@@ -87,3 +87,27 @@ def update_prova_endpoint(prova_id: int, prova_update: schemas.ProvaUpdate, db: 
 def delete_prova_endpoint(prova_id: int, db: Session = Depends(get_db)):
     crud.delete_prova(db, prova_id)
     return {"ok": True}
+
+# Inscrições 
+
+@app.post("/inscricoes/", response_model=schemas.InscricaoResponse)
+def create_inscricao_endpoint(inscricao: schemas.InscricaoCreate, db: Session = Depends(get_db)):
+    return crud.create_inscricao(db, inscricao) 
+
+@app.get("/inscricoes/{inscricao_id}", response_model=schemas.InscricaoResponse)
+def get_inscricao_endpoint(inscricao_id: int, db: Session = Depends(get_db)):
+    return crud.get_inscricao(db, inscricao_id)
+
+@app.get("/inscricoes/", response_model=list[schemas.InscricaoResponse])
+def get_inscricoes_endpoint(db: Session = Depends(get_db)):
+    return crud.get_inscricoes(db) 
+
+@app.put("/inscricoes/{inscricao_id}", response_model=schemas.InscricaoResponse)
+def update_inscricao_endpoint(inscricao_id: int, inscricao_update: schemas.InscricaoUpdate, db: Session = Depends(get_db)):
+    return crud.update_inscricao(db, inscricao_id, inscricao_update)
+
+@app.delete("/inscricoes/{inscricao_id}")
+def delete_inscricao_endpoint(inscricao_id: int, db: Session = Depends(get_db)):
+    crud.delete_inscricao(db, inscricao_id)
+    return {"ok": True}
+    

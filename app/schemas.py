@@ -97,3 +97,55 @@ class ProvaResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# Inscricao Schemas
+
+class InscricaoCreate(BaseModel):
+    id_prova: int
+    id_competidor: int
+    microchip_cao: str
+    colete_competidor: str
+    tempo_prova: Optional[float] = None
+    faltas_prova: Optional[int] = None
+    recusas_prova: Optional[int] = None
+    vel_media: Optional[float] = None
+    pontuacao: Optional[int] = None
+    hora_inicio: Optional[str] = None  # Use str for datetime in ISO format
+    status: str = "pendente"
+
+class InscricaoUpdate(BaseModel):
+    id_prova: Optional[int] = None
+    id_competidor: Optional[int] = None
+    microchip_cao: Optional[str] = None
+    colete_competidor: Optional[str] = None
+    tempo_prova: Optional[float] = None
+    faltas_prova: Optional[int] = None
+    recusas_prova: Optional[int] = None
+    vel_media: Optional[float] = None
+    pontuacao: Optional[int] = None
+    hora_inicio: Optional[str] = None  # Use str for datetime in ISO format
+    status: Optional[str] = None
+
+class InscricaoResponse(BaseModel):
+    id_inscricao: int
+    id_prova: int
+    id_competidor: int
+    microchip_cao: str
+    colete_competidor: str
+    tempo_prova: Optional[float] = None
+    faltas_prova: Optional[int] = None
+    recusas_prova: Optional[int] = None
+    vel_media: Optional[float] = None
+    pontuacao: Optional[int] = None
+    hora_inicio: Optional[str] = None  # Use str for datetime in ISO format
+    status: str
+
+    @field_validator("hora_inicio", mode="before")
+    def dt_to_str(cls, v):
+        if isinstance(v, (str, type(None))):
+            return v
+        return v.isoformat()
+
+    class Config:
+        from_attributes = True
+

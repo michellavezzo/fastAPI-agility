@@ -3,7 +3,7 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
 from .models import User, Competicao, Prova, Inscricao, Resultado
-from .schemas import ProvaCreate, ProvaUpdate, UserCreate, CompeticaoCreate, CompeticaoUpdate
+from .schemas import InscricaoCreate, InscricaoUpdate, ProvaCreate, ProvaUpdate, UserCreate, CompeticaoCreate, CompeticaoUpdate
 
 # User 
 def get_user(db: Session, user_id: int):
@@ -87,4 +87,35 @@ def update_prova(db: Session, prova_id: int, prova_update: ProvaUpdate):
 def delete_prova(db: Session, prova_id: int):
     db_prova = get_prova(db, prova_id)
     db.delete(db_prova)
+    db.commit()
+
+# Inscricao (Registration)
+
+def create_inscricao(db: Session, inscricao: InscricaoCreate):
+    data = inscricao.model_dump()
+    if data.get("hora_inicio"):
+        data["hora_inicio"] = datetime.fromisoformat(data["hora_inicio"])
+    db_inscricao = Inscricao(**data)
+    db.add(db_inscricao)
+    db.commit()
+    db.refresh(db_inscricao)
+    return db_inscricao
+
+def get_inscricao(db: Session, inscricao_id: int):
+    return db.query(Inscricao).filter(Inscricao.id_inscricao == inscricao_id).first()
+
+def get_inscricoes(db: Session):
+    return db.query(Inscricao).all()
+
+def update_inscricao(db: Session, inscricao_id: int, inscricao_update: InscricaoUpdate):
+    db_inscricao = get_inscricao(db, inscricao_id)
+    for key, value in inscricao_update.model_dump(exclude_unset=True).items():
+        setattr(db_inscricao, key, value)
+    db.commit()
+    db.refresh(db_inscricao)
+    return db_inscricao
+
+def delete_inscricao(db: Session, inscricao_id: int):
+    db_inscricao = get_inscricao(db, inscricao_id)
+    db.delete(db_inscricao)
     db.commit()
