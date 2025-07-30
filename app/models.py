@@ -1,6 +1,6 @@
 # app/models.py
 
-from sqlalchemy import Column, Integer, Float, String, DateTime, ForeignKey, func
+from sqlalchemy import Boolean, Column, Date, Integer, Float, String, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from .database import Base
 class User(Base):
@@ -10,14 +10,14 @@ class User(Base):
     name = Column(String, index=True)
     email = Column(String, unique=True, index=True)
     competicoes = relationship("Competicao", back_populates="responsavel")
-    avaliacoes = relationship("Avaliacao", back_populates="prova")
+    # avaliacoes = relationship("Avaliacao", back_populates="prova")
 
 class Competicao(Base):
     __tablename__ = "competicoes"
 
     id_competicao = Column(Integer, primary_key=True, index=True)
     nome = Column(String, nullable=False)
-    data = Column(Date, nullable=False)
+    data = Column(DateTime, nullable=False)
     localizacao = Column(String, nullable=False)
     nomes_arbitros_convidados = Column(String)
     nome_diretor_evento = Column(String)
@@ -34,8 +34,8 @@ class Prova(Base):
     categoria = Column(String, nullable=False)
     classe = Column(String, nullable=False)
     num_obstaculos = Column(Integer, nullable=False)
-    tsp = Column(Integer, nullable=False)
-    tmp = Column(Integer, nullable=False)
+    tsp = Column(Float, nullable=False)
+    tmp = Column(Float, nullable=False)
     vel_media_necessaria = Column(Float, nullable=False)
     comprimento_pista = Column(Integer, nullable=False)
     avaliacoes = relationship("Avaliacao", back_populates="prova")
@@ -137,4 +137,4 @@ class Resultado(Base):
     posicao = Column(Integer, nullable=False)
     total_pontos_t = Column(Integer, nullable=False)
     total_pontos_tp = Column(Integer, nullable=False)
-    inscricao = relationship("Inscricao", back_populates="resultado")
+    inscricao = relationship("Inscricao", back_populates="resultados")
