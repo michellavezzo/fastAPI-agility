@@ -110,4 +110,69 @@ def update_inscricao_endpoint(inscricao_id: int, inscricao_update: schemas.Inscr
 def delete_inscricao_endpoint(inscricao_id: int, db: Session = Depends(get_db)):
     crud.delete_inscricao(db, inscricao_id)
     return {"ok": True}
-    
+
+# Competidor
+@app.post("/competidor/", response_model=schemas.CompetidorResponse)
+def create_competidor_endpoint(competidor: schemas.CompetidorCreate, db: Session = Depends(get_db)):
+    return crud.create_competidor(db, competidor)
+
+@app.get("/competidor/{competidor_id}", response_model=schemas.CompetidorResponse)
+def get_competidor_endpoint(competidor_id: int, db: Session = Depends(get_db)):
+    return crud.get_competidor(db, competidor_id)
+
+@app.get("/competidor/", response_model=list[schemas.CompetidorResponse])
+def get_competidores_endpoint(db: Session = Depends(get_db)):
+    return crud.get_competidores(db)
+
+@app.put("/competidor/{competidor_id}", response_model=schemas.CompetidorResponse)
+def update_competidor_endpoint(competidor_id: int, competidor_update: schemas.CompetidorUpdate, db: Session = Depends(get_db)):
+    return crud.update_competidor(db, competidor_id, competidor_update)
+
+@app.delete("/competidor/{competidor_id}")
+def delete_competidor_endpoint(competidor_id: int, db: Session = Depends(get_db)):
+    crud.delete_competidor(db, competidor_id)
+    return {"ok": True}
+
+# Cao
+@app.post("/cao/", response_model=schemas.CaoResponse)
+def create_cao_endpoint(cao: schemas.CaoCreate, db: Session = Depends(get_db)):
+    return crud.create_cao(db, cao)
+
+@app.get("/cao/{microchip}", response_model=schemas.CaoResponse)
+def get_cao_endpoint(microchip: str, db: Session = Depends(get_db)):
+    return crud.get_cao(db, microchip)
+
+@app.get("/cao/", response_model=list[schemas.CaoResponse])
+def get_caes_endpoint(db: Session = Depends(get_db)):
+    return crud.get_caes(db)
+
+@app.put("/cao/{microchip}", response_model=schemas.CaoResponse)
+def update_cao_endpoint(microchip: str, cao_update: schemas.CaoUpdate, db: Session = Depends(get_db)):
+    return crud.update_cao(db, microchip, cao_update)
+
+@app.delete("/cao/{microchip}")
+def delete_cao_endpoint(microchip: str, db: Session = Depends(get_db)):
+    crud.delete_cao(db, microchip)
+    return {"ok": True}
+
+# Juiz
+@app.post("/juiz/", response_model=schemas.JuizResponse)
+def create_juiz_endpoint(juiz: schemas.JuizCreate, db: Session = Depends(get_db)):
+    return crud.create_juiz(db, juiz)
+
+@app.get("/juiz/{juiz_id}", response_model=schemas.JuizResponse)
+def get_juiz_endpoint(juiz_id: int, db: Session = Depends(get_db)):
+    return crud.get_juiz(db, juiz_id)
+
+@app.get("/juiz/", response_model=list[schemas.JuizResponse])
+def get_juizes_endpoint(db: Session = Depends(get_db)):
+    return crud.get_juizes(db)
+
+@app.put("/juiz/{juiz_id}", response_model=schemas.JuizResponse)
+def update_juiz_endpoint(juiz_id: int, juiz_update: schemas.JuizUpdate, db: Session = Depends(get_db)):
+    return crud.update_juiz(db, juiz_id, juiz_update)
+
+@app.delete("/juiz/{juiz_id}")
+def delete_juiz_endpoint(juiz_id: int, db: Session = Depends(get_db)):
+    crud.delete_juiz(db, juiz_id)
+    return {"ok": True}

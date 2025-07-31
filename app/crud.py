@@ -2,8 +2,8 @@
 
 from datetime import datetime
 from sqlalchemy.orm import Session
-from .models import User, Competicao, Prova, Inscricao, Resultado
-from .schemas import InscricaoCreate, InscricaoUpdate, ProvaCreate, ProvaUpdate, UserCreate, CompeticaoCreate, CompeticaoUpdate
+from .models import Cao, Competidor, Juiz, User, Competicao, Prova, Inscricao, Resultado
+from .schemas import CaoCreate, CaoUpdate, CompetidorCreate, CompetidorUpdate, InscricaoCreate, InscricaoUpdate, JuizCreate, JuizUpdate, ProvaCreate, ProvaUpdate, UserCreate, CompeticaoCreate, CompeticaoUpdate
 
 # User 
 def get_user(db: Session, user_id: int):
@@ -109,7 +109,10 @@ def get_inscricoes(db: Session):
 
 def update_inscricao(db: Session, inscricao_id: int, inscricao_update: InscricaoUpdate):
     db_inscricao = get_inscricao(db, inscricao_id)
-    for key, value in inscricao_update.model_dump(exclude_unset=True).items():
+    update_data = inscricao_update.model_dump(exclude_unset=True)
+    if update_data.get("hora_inicio"):
+        update_data["hora_inicio"] = datetime.fromisoformat(update_data["hora_inicio"])
+    for key, value in update_data.items():
         setattr(db_inscricao, key, value)
     db.commit()
     db.refresh(db_inscricao)
@@ -118,4 +121,85 @@ def update_inscricao(db: Session, inscricao_id: int, inscricao_update: Inscricao
 def delete_inscricao(db: Session, inscricao_id: int):
     db_inscricao = get_inscricao(db, inscricao_id)
     db.delete(db_inscricao)
+    db.commit()
+
+    # Competidor
+def create_competidor(db: Session, competidor: CompetidorCreate):
+    db_competidor = Competidor(**competidor.model_dump())
+    db.add(db_competidor)
+    db.commit()
+    db.refresh(db_competidor)
+    return db_competidor
+
+def get_competidor(db: Session, competidor_id: int):
+    return db.query(Competidor).filter(Competidor.id_competidor == competidor_id).first()
+
+def get_competidores(db: Session):
+    return db.query(Competidor).all()
+
+def update_competidor(db: Session, competidor_id: int, competidor_update: CompetidorUpdate):
+    db_competidor = get_competidor(db, competidor_id)
+    for key, value in competidor_update.model_dump(exclude_unset=True).items():
+        setattr(db_competidor, key, value)
+    db.commit()
+    db.refresh(db_competidor)
+    return db_competidor
+
+def delete_competidor(db: Session, competidor_id: int):
+    db_competidor = get_competidor(db, competidor_id)
+    db.delete(db_competidor)
+    db.commit()
+
+# Cao
+def create_cao(db: Session, cao: CaoCreate):
+    db_cao = Cao(**cao.model_dump())
+    db.add(db_cao)
+    db.commit()
+    db.refresh(db_cao)
+    return db_cao
+
+def get_cao(db: Session, microchip: str):
+    return db.query(Cao).filter(Cao.microchip == microchip).first()
+
+def get_caes(db: Session):
+    return db.query(Cao).all()
+
+def update_cao(db: Session, microchip: str, cao_update: CaoUpdate):
+    db_cao = get_cao(db, microchip)
+    for key, value in cao_update.model_dump(exclude_unset=True).items():
+        setattr(db_cao, key, value)
+    db.commit()
+    db.refresh(db_cao)
+    return db_cao
+
+def delete_cao(db: Session, microchip: str):
+    db_cao = get_cao(db, microchip)
+    db.delete(db_cao)
+    db.commit()
+
+# Juiz
+def create_juiz(db: Session, juiz: JuizCreate):
+    db_juiz = Juiz(**juiz.model_dump())
+    db.add(db_juiz)
+    db.commit()
+    db.refresh(db_juiz)
+    return db_juiz
+
+def get_juiz(db: Session, juiz_id: int):
+    return db.query(Juiz).filter(Juiz.id_juiz == juiz_id).first()
+
+def get_juizes(db: Session):
+    return db.query(Juiz).all()
+
+def update_juiz(db: Session, juiz_id: int, juiz_update: JuizUpdate):
+    db_juiz = get_juiz(db, juiz_id)
+    for key, value in juiz_update.model_dump(exclude_unset=True).items():
+        setattr(db_juiz, key, value)
+    db.commit()
+    db.refresh(db_juiz)
+    return db_juiz
+
+def delete_juiz(db: Session, juiz_id: int):
+    db_juiz = get_juiz(db, juiz_id)
+    db.delete(db_juiz)
     db.commit()

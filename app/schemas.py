@@ -149,3 +149,60 @@ class InscricaoResponse(BaseModel):
     class Config:
         from_attributes = True
 
+# Competidor
+class CompetidorCreate(BaseModel):
+    nome: str
+    escola: str
+
+class CompetidorUpdate(BaseModel):
+    nome: Optional[str] = None
+    escola: Optional[str] = None
+
+class CompetidorResponse(BaseModel):
+    id_competidor: int
+    nome: str
+    escola: str
+    class Config:
+        from_attributes = True
+
+# Cao
+class CaoCreate(BaseModel):
+    microchip: str
+    nome: str
+    raca: str
+    cernelha: str
+    categoria_salto: str
+    is_cao_branco: bool = False
+
+class CaoUpdate(BaseModel):
+    nome: Optional[str] = None
+    raca: Optional[str] = None
+    cernelha: Optional[str] = None
+    categoria_salto: Optional[str] = None
+    is_cao_branco: Optional[bool] = None
+
+class CaoResponse(BaseModel):
+    microchip: str
+    nome: str
+    raca: str
+    cernelha: str
+    categoria_salto: str
+    is_cao_branco: bool
+    class Config:
+        from_attributes = True
+
+# Juiz
+class JuizCreate(BaseModel):
+    nome: str
+    email: str
+
+class JuizUpdate(BaseModel):
+    nome: Optional[str] = None
+    email: Optional[str] = None
+
+class JuizResponse(BaseModel):
+    id_juiz: int
+    nome: str
+    email: str
+    class Config:
+        from_attributes = True
