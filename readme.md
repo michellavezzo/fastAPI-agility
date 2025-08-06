@@ -28,3 +28,11 @@ pip install -r requirements.txt
 # Run Your FastAPI Application
 
 uvicorn app.main:app --reload
+
+# Rodar Comandos SQL terminal
+
+sqlite3 agility.db
+
+# Create/Recriate Tables
+
+python create_tables.py
