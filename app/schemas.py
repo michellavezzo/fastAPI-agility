@@ -206,3 +206,90 @@ class JuizResponse(BaseModel):
     email: str
     class Config:
         from_attributes = True
+
+# Resultado
+class ResultadoCreate(BaseModel):
+    id_inscricao: int
+    posicao: Optional[int] = None
+    total_pontos_t: int
+    total_pontos_tp: int
+
+class ResultadoUpdate(BaseModel):
+    id_inscricao: Optional[int] = None
+    posicao: Optional[int] = None
+    total_pontos_t: Optional[int] = None
+    total_pontos_tp: Optional[int] = None
+
+class ResultadoResponse(BaseModel):
+    id_resultado: int
+    id_inscricao: int
+    posicao: Optional[int] = None  # Permite nulo
+    total_pontos_t: Optional[int] = None
+    total_pontos_tp: Optional[int] = None
+    class Config:
+        from_attributes = True
+
+# Avaliacao
+class AvaliacaoCreate(BaseModel):
+    id_prova: int
+    id_juiz: int
+    diretor_prova: str
+    comentarios: Optional[str] = None
+
+class AvaliacaoUpdate(BaseModel):
+    id_prova: Optional[int] = None
+    id_juiz: Optional[int] = None
+    diretor_prova: Optional[str] = None
+    comentarios: Optional[str] = None
+
+class AvaliacaoResponse(BaseModel):
+    id_avaliacao: int
+    id_prova: int
+    id_juiz: int
+    diretor_prova: str
+    comentarios: Optional[str] = None
+    criado_em: Optional[str] = None
+    atualizado_em: Optional[str] = None
+
+    @field_validator("criado_em", "atualizado_em", mode="before")
+    def dt_to_str(cls, v):
+        if isinstance(v, (str, type(None))):
+            return v
+        return v.isoformat()
+
+    class Config:
+        from_attributes = True
+
+# Cronometragem
+class CronometragemCreate(BaseModel):
+    id_inscricao: int
+    tempo_inicial: str  # ISO format
+    tempo_final: Optional[str] = None
+    status: str = "parado"
+    tempo_oficial: Optional[float] = None
+
+class CronometragemUpdate(BaseModel):
+    id_inscricao: Optional[int] = None
+    tempo_inicial: Optional[str] = None
+    tempo_final: Optional[str] = None
+    status: Optional[str] = None
+    tempo_oficial: Optional[float] = None
+
+class CronometragemResponse(BaseModel):
+    id_cronometro: int
+    id_inscricao: int
+    tempo_inicial: str
+    tempo_final: Optional[str] = None
+    status: str
+    tempo_oficial: Optional[float] = None
+    criado_em: Optional[str] = None
+    atualizado_em: Optional[str] = None
+
+    @field_validator("tempo_inicial", "tempo_final", "criado_em", "atualizado_em", mode="before")
+    def dt_to_str(cls, v):
+        if isinstance(v, (str, type(None))):
+            return v
+        return v.isoformat()
+
+    class Config:
+        from_attributes = True

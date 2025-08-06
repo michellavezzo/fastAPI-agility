@@ -134,7 +134,7 @@ class Resultado(Base):
 
     id_resultado = Column(Integer, primary_key=True, index=True)
     id_inscricao = Column(Integer, ForeignKey("inscricao.id_inscricao"))
-    posicao = Column(Integer, nullable=False)
-    total_pontos_t = Column(Integer, nullable=False)
-    total_pontos_tp = Column(Integer, nullable=False)
+    posicao = Column(Integer, nullable=True)
+    total_pontos_t = Column(Integer, nullable=True)
+    total_pontos_tp = Column(Integer, nullable=True)
     inscricao = relationship("Inscricao", back_populates="resultados")

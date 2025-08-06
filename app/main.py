@@ -176,3 +176,69 @@ def update_juiz_endpoint(juiz_id: int, juiz_update: schemas.JuizUpdate, db: Sess
 def delete_juiz_endpoint(juiz_id: int, db: Session = Depends(get_db)):
     crud.delete_juiz(db, juiz_id)
     return {"ok": True}
+
+# Resultado
+@app.post("/resultados/", response_model=schemas.ResultadoResponse)
+def create_resultado_endpoint(resultado: schemas.ResultadoCreate, db: Session = Depends(get_db)):
+    return crud.create_resultado(db, resultado)
+
+@app.get("/resultados/{resultado_id}", response_model=schemas.ResultadoResponse)
+def get_resultado_endpoint(resultado_id: int, db: Session = Depends(get_db)):
+    return crud.get_resultado(db, resultado_id)
+
+@app.get("/resultados/", response_model=list[schemas.ResultadoResponse])
+def get_resultados_endpoint(db: Session = Depends(get_db)):
+    return crud.get_resultados(db)
+
+@app.put("/resultados/{resultado_id}", response_model=schemas.ResultadoResponse)
+def update_resultado_endpoint(resultado_id: int, resultado_update: schemas.ResultadoUpdate, db: Session = Depends(get_db)):
+    return crud.update_resultado(db, resultado_id, resultado_update)
+
+@app.delete("/resultados/{resultado_id}")
+def delete_resultado_endpoint(resultado_id: int, db: Session = Depends(get_db)):
+    crud.delete_resultado(db, resultado_id)
+    return {"ok": True}
+
+# Avaliacao
+@app.post("/avaliacoes/", response_model=schemas.AvaliacaoResponse)
+def create_avaliacao_endpoint(avaliacao: schemas.AvaliacaoCreate, db: Session = Depends(get_db)):
+    return crud.create_avaliacao(db, avaliacao)
+
+@app.get("/avaliacoes/{avaliacao_id}", response_model=schemas.AvaliacaoResponse)
+def get_avaliacao_endpoint(avaliacao_id: int, db: Session = Depends(get_db)):
+    return crud.get_avaliacao(db, avaliacao_id)
+
+@app.get("/avaliacoes/", response_model=list[schemas.AvaliacaoResponse])
+def get_avaliacoes_endpoint(db: Session = Depends(get_db)):
+    return crud.get_avaliacoes(db)
+
+@app.put("/avaliacoes/{avaliacao_id}", response_model=schemas.AvaliacaoResponse)
+def update_avaliacao_endpoint(avaliacao_id: int, avaliacao_update: schemas.AvaliacaoUpdate, db: Session = Depends(get_db)):
+    return crud.update_avaliacao(db, avaliacao_id, avaliacao_update)
+
+@app.delete("/avaliacoes/{avaliacao_id}")
+def delete_avaliacao_endpoint(avaliacao_id: int, db: Session = Depends(get_db)):
+    crud.delete_avaliacao(db, avaliacao_id)
+    return {"ok": True}
+
+# Cronometragem
+@app.post("/cronometros/", response_model=schemas.CronometragemResponse)
+def create_cronometro_endpoint(cronometro: schemas.CronometragemCreate, db: Session = Depends(get_db)):
+    return crud.create_cronometro(db, cronometro)
+
+@app.get("/cronometros/{cronometro_id}", response_model=schemas.CronometragemResponse)
+def get_cronometro_endpoint(cronometro_id: int, db: Session = Depends(get_db)):
+    return crud.get_cronometro(db, cronometro_id)
+
+@app.get("/cronometros/", response_model=list[schemas.CronometragemResponse])
+def get_cronometros_endpoint(db: Session = Depends(get_db)):
+    return crud.get_cronometros(db)
+
+@app.put("/cronometros/{cronometro_id}", response_model=schemas.CronometragemResponse)
+def update_cronometro_endpoint(cronometro_id: int, cronometro_update: schemas.CronometragemUpdate, db: Session = Depends(get_db)):
+    return crud.update_cronometro(db, cronometro_id, cronometro_update)
+
+@app.delete("/cronometros/{cronometro_id}")
+def delete_cronometro_endpoint(cronometro_id: int, db: Session = Depends(get_db)):
+    crud.delete_cronometro(db, cronometro_id)
+    return {"ok": True}

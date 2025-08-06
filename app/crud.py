@@ -2,8 +2,8 @@
 
 from datetime import datetime
 from sqlalchemy.orm import Session
-from .models import Cao, Competidor, Juiz, User, Competicao, Prova, Inscricao, Resultado
-from .schemas import CaoCreate, CaoUpdate, CompetidorCreate, CompetidorUpdate, InscricaoCreate, InscricaoUpdate, JuizCreate, JuizUpdate, ProvaCreate, ProvaUpdate, UserCreate, CompeticaoCreate, CompeticaoUpdate
+from .models import Avaliacao, Cao, Competidor, Cronometragem, Juiz, User, Competicao, Prova, Inscricao, Resultado
+from .schemas import AvaliacaoCreate, AvaliacaoUpdate, CaoCreate, CaoUpdate, CompetidorCreate, CompetidorUpdate, CronometragemCreate, CronometragemUpdate, InscricaoCreate, InscricaoUpdate, JuizCreate, JuizUpdate, ProvaCreate, ProvaUpdate, ResultadoCreate, ResultadoUpdate, UserCreate, CompeticaoCreate, CompeticaoUpdate
 
 # User 
 def get_user(db: Session, user_id: int):
@@ -202,4 +202,95 @@ def update_juiz(db: Session, juiz_id: int, juiz_update: JuizUpdate):
 def delete_juiz(db: Session, juiz_id: int):
     db_juiz = get_juiz(db, juiz_id)
     db.delete(db_juiz)
+    db.commit()
+
+# Resultado
+def create_resultado(db: Session, resultado: ResultadoCreate):
+    db_resultado = Resultado(**resultado.model_dump())
+    db.add(db_resultado)
+    db.commit()
+    db.refresh(db_resultado)
+    return db_resultado
+
+def get_resultado(db: Session, resultado_id: int):
+    return db.query(Resultado).filter(Resultado.id_resultado == resultado_id).first()
+
+def get_resultados(db: Session):
+    return db.query(Resultado).all()
+
+def update_resultado(db: Session, resultado_id: int, resultado_update: ResultadoUpdate):
+    db_resultado = get_resultado(db, resultado_id)
+    for key, value in resultado_update.model_dump(exclude_unset=True).items():
+        setattr(db_resultado, key, value)
+    db.commit()
+    db.refresh(db_resultado)
+    return db_resultado
+
+def delete_resultado(db: Session, resultado_id: int):
+    db_resultado = get_resultado(db, resultado_id)
+    db.delete(db_resultado)
+    db.commit()
+
+# Avaliacao
+def create_avaliacao(db: Session, avaliacao: AvaliacaoCreate):
+    db_avaliacao = Avaliacao(**avaliacao.model_dump())
+    db.add(db_avaliacao)
+    db.commit()
+    db.refresh(db_avaliacao)
+    return db_avaliacao
+
+def get_avaliacao(db: Session, avaliacao_id: int):
+    return db.query(Avaliacao).filter(Avaliacao.id_avaliacao == avaliacao_id).first()
+
+def get_avaliacoes(db: Session):
+    return db.query(Avaliacao).all()
+
+def update_avaliacao(db: Session, avaliacao_id: int, avaliacao_update: AvaliacaoUpdate):
+    db_avaliacao = get_avaliacao(db, avaliacao_id)
+    for key, value in avaliacao_update.model_dump(exclude_unset=True).items():
+        setattr(db_avaliacao, key, value)
+    db.commit()
+    db.refresh(db_avaliacao)
+    return db_avaliacao
+
+def delete_avaliacao(db: Session, avaliacao_id: int):
+    db_avaliacao = get_avaliacao(db, avaliacao_id)
+    db.delete(db_avaliacao)
+    db.commit()
+
+# Cronometragem
+def create_cronometro(db: Session, cronometro: CronometragemCreate):
+    data = cronometro.model_dump()
+    if data.get("tempo_inicial"):
+        data["tempo_inicial"] = datetime.fromisoformat(data["tempo_inicial"])
+    if data.get("tempo_final"):
+        data["tempo_final"] = datetime.fromisoformat(data["tempo_final"])
+    db_cronometro = Cronometragem(**data)
+    db.add(db_cronometro)
+    db.commit()
+    db.refresh(db_cronometro)
+    return db_cronometro
+
+def get_cronometro(db: Session, cronometro_id: int):
+    return db.query(Cronometragem).filter(Cronometragem.id_cronometro == cronometro_id).first()
+
+def get_cronometros(db: Session):
+    return db.query(Cronometragem).all()
+
+def update_cronometro(db: Session, cronometro_id: int, cronometro_update: CronometragemUpdate):
+    db_cronometro = get_cronometro(db, cronometro_id)
+    update_data = cronometro_update.model_dump(exclude_unset=True)
+    if update_data.get("tempo_inicial"):
+        update_data["tempo_inicial"] = datetime.fromisoformat(update_data["tempo_inicial"])
+    if update_data.get("tempo_final"):
+        update_data["tempo_final"] = datetime.fromisoformat(update_data["tempo_final"])
+    for key, value in update_data.items():
+        setattr(db_cronometro, key, value)
+    db.commit()
+    db.refresh(db_cronometro)
+    return db_cronometro
+
+def delete_cronometro(db: Session, cronometro_id: int):
+    db_cronometro = get_cronometro(db, cronometro_id)
+    db.delete(db_cronometro)
     db.commit()
