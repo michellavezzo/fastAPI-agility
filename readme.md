@@ -36,3 +36,13 @@ sqlite3 agility.db
 # Create/Recriate Tables
 
 python create_tables.py
+
+# Install Raspberry PI scripts
+
+- Dê permissão de execução com
+
+`chmod +x install_agility.sh`
+
+# Execute na Raspberry Pi
+
+`./install_agility.sh`
