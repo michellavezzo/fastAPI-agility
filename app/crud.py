@@ -3,7 +3,7 @@
 from datetime import datetime
 from sqlalchemy.orm import Session
 from .models import Avaliacao, Cao, Competidor, Cronometragem, Juiz, User, Competicao, Prova, Inscricao, Resultado
-from .schemas import AvaliacaoCreate, AvaliacaoUpdate, CaoCreate, CaoUpdate, CompetidorCreate, CompetidorUpdate, CronometragemCreate, CronometragemUpdate, InscricaoCreate, InscricaoUpdate, JuizCreate, JuizUpdate, ProvaCreate, ProvaUpdate, ResultadoCreate, ResultadoUpdate, UserCreate, CompeticaoCreate, CompeticaoUpdate
+from .schemas import AvaliacaoCreate, AvaliacaoUpdate, CaoCreate, CaoUpdate, CompetidorCreate, CompetidorUpdate, CronometragemCreate, CronometragemUpdate, InscricaoCreate, InscricaoUpdate, JuizCreate, JuizUpdate, ProvaCreate, ProvaUpdate, ResultadoCreate, ResultadoUpdate, UserCreate, UserUpdate, CompeticaoCreate, CompeticaoUpdate
 
 # User 
 def get_user(db: Session, user_id: int):
@@ -23,6 +23,14 @@ def delete_user(db: Session, user_id: int):
     user = db.query(User).filter(User.id == user_id).first()
     db.delete(user)
     db.commit()
+
+def update_user(db: Session, user_id: int, user: UserUpdate):
+    db_user = db.query(User).filter(User.id == user_id).first()
+    for key, value in user.model_dump(exclude_unset=True).items():
+        setattr(db_user, key, value)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
 
 # Competitions
 
@@ -106,6 +114,9 @@ def get_inscricao(db: Session, inscricao_id: int):
 
 def get_inscricoes(db: Session):
     return db.query(Inscricao).all()
+
+def get_inscricoes_por_status(db: Session, status: str):
+    return db.query(Inscricao).filter(Inscricao.status == status).all()
 
 def update_inscricao(db: Session, inscricao_id: int, inscricao_update: InscricaoUpdate):
     db_inscricao = get_inscricao(db, inscricao_id)

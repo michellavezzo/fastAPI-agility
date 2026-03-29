@@ -77,6 +77,7 @@ class Cronometragem(Base):
     tempo_final = Column(DateTime(timezone=True), nullable=True)
     status = Column(String, nullable=False, default="parado")
     tempo_oficial = Column(Float, nullable=True)
+    tipo = Column(String, nullable=False, default="prova")
     criado_em = Column(DateTime(timezone=True), server_default=func.now())
     atualizado_em = Column(DateTime(timezone=True), onupdate=func.now())
 

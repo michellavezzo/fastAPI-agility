@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Agility - Operador</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#1a1a2e;color:#eee;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;padding:10px}
+h2{text-align:center;font-size:1.1rem;color:#888;margin-bottom:8px}
+.timer-box{text-align:center;margin-bottom:10px}
+.timer-box .label{font-size:.8rem;color:#666;text-transform:uppercase;letter-spacing:2px}
+.timer-box .time{font-size:2.4rem;font-weight:bold;font-variant-numeric:tabular-nums}
+.estado{text-align:center;padding:6px;font-weight:bold;font-size:1rem;border-radius:6px;margin-bottom:10px;text-transform:uppercase;letter-spacing:1px}
+.estado-idle{background:#333;color:#999}
+.estado-preparado{background:#e6a800;color:#000}
+.estado-autorizado{background:#0077cc;color:#fff}
+.estado-rodando{background:#c00;color:#fff}
+.estado-finalizado{background:#090;color:#fff}
+.section{background:#222;padding:10px;border-radius:8px;margin-bottom:10px}
+.section-title{font-size:.85rem;color:#888;margin-bottom:6px;text-transform:uppercase}
+label{display:block;font-size:.8rem;color:#aaa;margin-bottom:4px}
+select,input{width:100%;padding:8px;border-radius:4px;border:1px solid #444;background:#2a2a3e;color:#eee;font-size:.95rem;margin-bottom:8px}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+button{flex:1;min-width:120px;padding:12px 8px;border:none;border-radius:6px;font-size:.95rem;font-weight:bold;cursor:pointer;transition:opacity .15s}
+button:active{opacity:.7}
+button:disabled{opacity:.3;cursor:not-allowed}
+.btn-primary{background:#0077cc;color:#fff}
+.btn-success{background:#28a745;color:#fff}
+.btn-danger{background:#dc3545;color:#fff}
+.btn-warning{background:#e6a800;color:#000}
+.btn-secondary{background:#555;color:#fff}
+.btn-teal{background:#17a2b8;color:#fff}
+.counters{display:flex;gap:10px;margin-bottom:8px}
+.counter{flex:1;text-align:center;background:#2a2a3e;padding:8px;border-radius:6px}
+.counter .val{font-size:2rem;font-weight:bold}
+.counter .lbl{font-size:.75rem;color:#888;text-transform:uppercase}
+.counter-controls{display:flex;gap:6px}
+.counter-controls button{flex:1;padding:8px}
+.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;font-size:.85rem}
+.info-grid dt{color:#888}
+.info-grid dd{color:#ccc;font-weight:bold}
+.warn{color:#ff0;font-size:.85rem;text-align:center;margin:4px 0}
+</style>
+</head>
+<body>
+
+<div id="estadoDiv" class="estado estado-idle">Aguardando</div>
+
+<div class="timer-box">
+  <div class="label">TOP – Tempo Oficial da Prova</div>
+  <div id="topTimer" class="time" style="color:#0f0">00:00.000</div>
+</div>
+<div class="timer-box">
+  <div class="label">TIA – Tempo de Início Autorizado</div>
+  <div id="tiaTimer" class="time" style="color:#aaa;font-size:1.4rem">00:00.000</div>
+</div>
+
+<div class="section" id="secSelecao">
+  <div class="section-title">Seleção de Inscrição</div>
+  <select id="selInscricao"><option value="">Carregando...</option></select>
+  <div class="btn-row">
+    <button class="btn-primary" id="btnPreparar">Preparar</button>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Controle da Prova</div>
+  <div class="btn-row" style="margin-bottom:8px">
+    <button class="btn-warning" id="btnAutorizar" disabled>Autorizar Largada</button>
+    <button class="btn-teal" id="btnSimular" disabled>Simular Sensor</button>
+  </div>
+  <div class="btn-row">
+    <button class="btn-danger" id="btnForcarFim" disabled>Forçar Fim</button>
+    <button class="btn-success" id="btnConfirmar" disabled>Confirmar</button>
+    <button class="btn-secondary" id="btnReset">Reset</button>
+  </div>
+</div>
+
+<div class="section">
+  <div class="section-title">Faltas e Recusas</div>
+  <div class="counters">
+    <div class="counter"><div id="faltas" class="val" style="color:#f80">0</div><div class="lbl">Faltas</div>
+      <div class="counter-controls">
+        <button class="btn-warning" id="btnFaltaPlus" disabled>+</button>
+        <button class="btn-secondary" id="btnFaltaMinus" disabled>−</button>
+      </div>
+    </div>
+    <div class="counter"><div id="recusas" class="val" style="color:#e44">0</div><div class="lbl">Recusas</div>
+      <div class="counter-controls">
+        <button class="btn-danger" id="btnRecusaPlus" disabled>+</button>
+        <button class="btn-secondary" id="btnRecusaMinus" disabled>−</button>
+      </div>
+    </div>
+  </div>
+  <div id="warnRecusas" class="warn hidden"></div>
+</div>
+
+<div class="section" id="secInfo">
+  <div class="section-title">Dados da Inscrição</div>
+  <dl class="info-grid">
+    <dt>Competidor</dt><dd id="iComp">-</dd>
+    <dt>Cão</dt><dd id="iCao">-</dd>
+    <dt>Raça</dt><dd id="iRaca">-</dd>
+    <dt>Colete</dt><dd id="iColete">-</dd>
+    <dt>Categoria</dt><dd id="iCat">-</dd>
+    <dt>Classe</dt><dd id="iClasse">-</dd>
+    <dt>TSP</dt><dd id="iTsp">-</dd>
+    <dt>TMP</dt><dd id="iTmp">-</dd>
+  </dl>
+</div>
+
+<script>
+const POLL_MS = 250;
+const ESTADO_LABELS = {idle:'Aguardando',preparado:'Preparado',autorizado:'Autorizado',rodando:'Em Prova',finalizado:'Finalizado'};
+let lastSnapshot = null;
+let lastSnapshotTime = 0;
+
+function formatTime(s){const m=Math.floor(s/60);const sec=Math.floor(s%60);const ms=Math.floor((s-Math.floor(s))*1000);return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;}
+function interpolate(base,at){if(!base)return{tia:'00:00.000',top:'00:00.000'};const el=(performance.now()-at)/1000;let tia=base.tia_decorrido,top=base.top_decorrido;if(base.estado==='autorizado')tia+=el;if(base.estado==='rodando')top+=el;return{tia:formatTime(tia),top:formatTime(top)};}
+
+const $ = id => document.getElementById(id);
+const postJson = (url, body) => fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):'{}'});
+
+async function loadInscricoes(){
+  try {
+    const r = await fetch('/inscricoes/?status=pendente');
+    if(!r.ok)return;
+    const list = await r.json();
+    const sel = $('selInscricao');
+    sel.innerHTML = '<option value="">-- Selecione --</option>';
+    list.forEach(i=>{
+      const opt = document.createElement('option');
+      opt.value = i.id_inscricao;
+      opt.textContent = `#${i.id_inscricao} - Colete ${i.colete_competidor}`;
+      sel.appendChild(opt);
+    });
+  } catch(_){}
+}
+
+function updateButtons(estado){
+  $('btnPreparar').disabled = (estado==='rodando'||estado==='autorizado');
+  $('btnAutorizar').disabled = estado!=='preparado';
+  $('btnSimular').disabled = !(estado==='autorizado'||estado==='rodando');
+  $('btnForcarFim').disabled = estado!=='rodando';
+  $('btnConfirmar').disabled = estado!=='finalizado';
+  const fr = estado==='rodando'||estado==='finalizado';
+  $('btnFaltaPlus').disabled = !fr;
+  $('btnFaltaMinus').disabled = !fr;
+  $('btnRecusaPlus').disabled = !fr;
+  $('btnRecusaMinus').disabled = !fr;
+}
+
+function applyState(d){
+  const div=$('estadoDiv');
+  div.className='estado estado-'+d.estado;
+  div.textContent=ESTADO_LABELS[d.estado]||d.estado;
+  $('faltas').textContent=d.faltas;
+  $('recusas').textContent=d.recusas;
+  const w=$('warnRecusas');
+  if(d.recusas>=3){w.textContent='⚠ 3 recusas — possível eliminação';w.classList.remove('hidden');}else{w.classList.add('hidden');}
+  $('iComp').textContent=d.competidor_nome||'-';
+  $('iCao').textContent=d.cao_nome||'-';
+  $('iRaca').textContent=d.cao_raca||'-';
+  $('iColete').textContent=d.colete_competidor||'-';
+  $('iCat').textContent=d.categoria||'-';
+  $('iClasse').textContent=d.classe||'-';
+  $('iTsp').textContent=d.tsp!=null?d.tsp+'s':'-';
+  $('iTmp').textContent=d.tmp!=null?d.tmp+'s':'-';
+  updateButtons(d.estado);
+}
+
+function renderFrame(){
+  const v=interpolate(lastSnapshot,lastSnapshotTime);
+  $('topTimer').textContent=v.top;
+  $('tiaTimer').textContent=v.tia;
+  requestAnimationFrame(renderFrame);
+}
+
+async function poll(){
+  try{
+    const r=await fetch('/prova-ativa/estado');
+    if(r.ok){const d=await r.json();lastSnapshot=d;lastSnapshotTime=performance.now();applyState(d);}
+  }catch(_){}
+  setTimeout(poll,POLL_MS);
+}
+
+$('btnPreparar').onclick = async()=>{
+  const id=$('selInscricao').value;
+  if(!id){alert('Selecione uma inscrição');return;}
+  await postJson('/prova-ativa/preparar',{id_inscricao:parseInt(id)});
+};
+$('btnAutorizar').onclick = ()=>postJson('/prova-ativa/autorizar');
+$('btnSimular').onclick = ()=>postJson('/prova-ativa/simular-sensor');
+$('btnForcarFim').onclick = ()=>postJson('/prova-ativa/forcar-fim');
+$('btnConfirmar').onclick = async()=>{
+  const r=await postJson('/prova-ativa/confirmar');
+  if(r.ok){alert('Resultado confirmado e salvo!');loadInscricoes();}
+  else{const e=await r.json();alert('Erro: '+(e.detail||'desconhecido'));}
+};
+$('btnReset').onclick = ()=>{if(confirm('Resetar cronômetro?'))postJson('/prova-ativa/reset');};
+$('btnFaltaPlus').onclick = ()=>postJson('/prova-ativa/falta');
+$('btnFaltaMinus').onclick = ()=>postJson('/prova-ativa/desfazer-falta');
+$('btnRecusaPlus').onclick = ()=>postJson('/prova-ativa/recusa');
+$('btnRecusaMinus').onclick = ()=>postJson('/prova-ativa/desfazer-recusa');
+
+requestAnimationFrame(renderFrame);
+loadInscricoes();
+poll();
+</script>
+</body>
+</html>

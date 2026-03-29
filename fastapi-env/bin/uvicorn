@@ -1,4 +1,4 @@
-#!/Users/michellavezzo/Documents/UFPB/TCC/agility-back/fastapi-env/bin/python
+#!/Users/michellavezzo/Documents/UFPB/TCC/agility-back/fastapi-env/bin/python3.13
 # -*- coding: utf-8 -*-
 import re
 import sys

@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agility - Painel Público</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#111;color:#eee;font-family:'Segoe UI',Arial,sans-serif;overflow:hidden;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+.estado-bar{position:fixed;top:0;left:0;right:0;text-align:center;padding:8px;font-size:1.4rem;font-weight:bold;text-transform:uppercase;letter-spacing:2px}
+.estado-idle{background:#333;color:#999}
+.estado-preparado{background:#e6a800;color:#000}
+.estado-autorizado{background:#0077cc;color:#fff}
+.estado-rodando{background:#c00;color:#fff;animation:pulse 1s infinite}
+.estado-finalizado{background:#090;color:#fff}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.7}}
+.top-timer{font-size:15vw;font-weight:bold;font-variant-numeric:tabular-nums;letter-spacing:.05em;line-height:1;margin:10px 0}
+.tia-timer{font-size:4vw;color:#aaa;font-variant-numeric:tabular-nums}
+.tia-label,.top-label{font-size:1.8vw;color:#666;text-transform:uppercase;letter-spacing:3px}
+.info-row{display:flex;gap:40px;margin-top:20px;font-size:2.5vw}
+.info-item{text-align:center}
+.info-item .val{font-size:4vw;font-weight:bold}
+.info-item .lbl{font-size:1.4vw;color:#666;text-transform:uppercase}
+.faltas .val{color:#f80}
+.recusas .val{color:#e44}
+.competitor-info{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:30px;padding:12px;background:rgba(0,0,0,.7);font-size:1.6vw;color:#aaa}
+.competitor-info span{color:#ddd;font-weight:bold}
+.hidden{display:none}
+</style>
+</head>
+<body>
+
+<div id="estadoBar" class="estado-bar estado-idle">Aguardando</div>
+
+<div class="top-label">Tempo Oficial da Prova</div>
+<div id="topTimer" class="top-timer">00:00.000</div>
+
+<div class="tia-label">Tempo de Início Autorizado</div>
+<div id="tiaTimer" class="tia-timer">00:00.000</div>
+
+<div class="info-row">
+  <div class="info-item faltas"><div id="faltas" class="val">0</div><div class="lbl">Faltas</div></div>
+  <div class="info-item recusas"><div id="recusas" class="val">0</div><div class="lbl">Recusas</div></div>
+</div>
+
+<div id="competitorInfo" class="competitor-info hidden">
+  <div>Competidor: <span id="compNome">-</span></div>
+  <div>Cão: <span id="caoNome">-</span> (<span id="caoRaca">-</span>)</div>
+  <div>Colete: <span id="colete">-</span></div>
+  <div>Categoria: <span id="categoria">-</span></div>
+</div>
+
+<script>
+const POLL_MS = 100;
+const ESTADO_LABELS = {
+  idle: 'Aguardando',
+  preparado: 'Preparado',
+  autorizado: 'Autorizado',
+  rodando: 'Em Prova',
+  finalizado: 'Finalizado',
+};
+
+let lastSnapshot = null;
+let lastSnapshotTime = 0;
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds - Math.floor(seconds)) * 1000);
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
+}
+
+function interpolate(base, snapshotAt) {
+  if (!base) return {tia: '00:00.000', top: '00:00.000'};
+  const now = performance.now();
+  const elapsed = (now - snapshotAt) / 1000;
+  let tia = base.tia_decorrido;
+  let top = base.top_decorrido;
+  if (base.estado === 'autorizado') tia += elapsed;
+  if (base.estado === 'rodando') top += elapsed;
+  return {tia: formatTime(tia), top: formatTime(top)};
+}
+
+function applyState(data) {
+  const bar = document.getElementById('estadoBar');
+  bar.className = 'estado-bar estado-' + data.estado;
+  bar.textContent = ESTADO_LABELS[data.estado] || data.estado;
+
+  document.getElementById('faltas').textContent = data.faltas;
+  document.getElementById('recusas').textContent = data.recusas;
+
+  const ci = document.getElementById('competitorInfo');
+  if (data.estado !== 'idle') {
+    ci.classList.remove('hidden');
+    document.getElementById('compNome').textContent = data.competidor_nome || '-';
+    document.getElementById('caoNome').textContent = data.cao_nome || '-';
+    document.getElementById('caoRaca').textContent = data.cao_raca || '-';
+    document.getElementById('colete').textContent = data.colete_competidor || '-';
+    document.getElementById('categoria').textContent = (data.categoria || '') + ' ' + (data.classe || '');
+  } else {
+    ci.classList.add('hidden');
+  }
+}
+
+function renderFrame() {
+  const vals = interpolate(lastSnapshot, lastSnapshotTime);
+  document.getElementById('topTimer').textContent = vals.top;
+  document.getElementById('tiaTimer').textContent = vals.tia;
+  requestAnimationFrame(renderFrame);
+}
+
+async function poll() {
+  try {
+    const r = await fetch('/prova-ativa/estado');
+    if (r.ok) {
+      const data = await r.json();
+      lastSnapshot = data;
+      lastSnapshotTime = performance.now();
+      applyState(data);
+    }
+  } catch (_) {}
+  setTimeout(poll, POLL_MS);
+}
+
+requestAnimationFrame(renderFrame);
+poll();
+</script>
+</body>
+</html>

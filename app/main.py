@@ -1,11 +1,29 @@
-from fastapi import FastAPI, Depends, HTTPException
+from pathlib import Path as FilePath
+from typing import Optional
+
+from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
+
 from . import crud, models, schemas
+from .chrono import Chronometer
 from .database import engine, get_db
 
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+chrono = Chronometer()
+STATIC_DIR = FilePath(__file__).resolve().parent.parent / "static"
 
 #  Usuários
 
@@ -31,8 +49,12 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
     crud.delete_user(db=db, user_id=user_id)
     return {"message": "Usuário deletado com sucesso"}
 
+@app.get("/users/", response_model=list[schemas.UserResponse])
+def list_users(db: Session = Depends(get_db)):
+    return db.query(models.User).all()
+
 @app.put("/users/{user_id}", response_model=schemas.UserResponse)
-def update_user(user_id: int, user: schemas.UserCreate, db: Session = Depends(get_db)):
+def update_user(user_id: int, user: schemas.UserUpdate, db: Session = Depends(get_db)):
     db_user = crud.get_user(db, user_id=user_id)
     if db_user is None:
         raise HTTPException(status_code=404, detail="Usuário não encontrado")
@@ -50,6 +72,10 @@ def read_competition(competition_id: int, db: Session = Depends(get_db)):
     if db_competition is None:
         raise HTTPException(status_code=404, detail="Competição não encontrada")
     return db_competition
+
+@app.get("/competicoes/", response_model=list[schemas.CompeticaoResponse])
+def list_competitions(db: Session = Depends(get_db)):
+    return db.query(models.Competicao).all()
 
 @app.delete("/competicoes/{competition_id}")
 def delete_competition(competition_id: int, db: Session = Depends(get_db)): 
@@ -99,7 +125,9 @@ def get_inscricao_endpoint(inscricao_id: int, db: Session = Depends(get_db)):
     return crud.get_inscricao(db, inscricao_id)
 
 @app.get("/inscricoes/", response_model=list[schemas.InscricaoResponse])
-def get_inscricoes_endpoint(db: Session = Depends(get_db)):
+def get_inscricoes_endpoint(status: Optional[str] = Query(None), db: Session = Depends(get_db)):
+    if status:
+        return crud.get_inscricoes_por_status(db, status)
     return crud.get_inscricoes(db) 
 
 @app.put("/inscricoes/{inscricao_id}", response_model=schemas.InscricaoResponse)
@@ -242,3 +270,155 @@ def update_cronometro_endpoint(cronometro_id: int, cronometro_update: schemas.Cr
 def delete_cronometro_endpoint(cronometro_id: int, db: Session = Depends(get_db)):
     crud.delete_cronometro(db, cronometro_id)
     return {"ok": True}
+
+
+# ────────────────── Prova Ativa (cronômetro em tempo real) ──────────────────
+
+@app.post("/prova-ativa/preparar", response_model=schemas.ProvaAtivaEstado)
+def preparar_prova(body: schemas.ProvaAtivaPreparar, db: Session = Depends(get_db)):
+    insc = crud.get_inscricao(db, body.id_inscricao)
+    if not insc:
+        raise HTTPException(status_code=404, detail="Inscrição não encontrada")
+    dados = {}
+    if insc.competidor:
+        dados["competidor_nome"] = insc.competidor.nome
+    if insc.cao:
+        dados["cao_nome"] = insc.cao.nome
+        dados["cao_raca"] = insc.cao.raca
+    dados["colete_competidor"] = insc.colete_competidor
+    if insc.prova:
+        dados["categoria"] = insc.prova.categoria
+        dados["classe"] = insc.prova.classe
+        dados["num_obstaculos"] = insc.prova.num_obstaculos
+        dados["comprimento_pista"] = insc.prova.comprimento_pista
+        dados["tsp"] = insc.prova.tsp
+        dados["tmp"] = insc.prova.tmp
+    chrono.prepare(body.id_inscricao, dados)
+    return chrono.get_estado_completo()
+
+
+@app.post("/prova-ativa/autorizar", response_model=schemas.ProvaAtivaEstado)
+def autorizar_prova():
+    if not chrono.autorizar():
+        raise HTTPException(status_code=409, detail="Estado inválido para autorizar")
+    return chrono.get_estado_completo()
+
+
+@app.get("/prova-ativa/estado", response_model=schemas.ProvaAtivaEstado)
+def estado_prova():
+    return chrono.get_estado_completo()
+
+
+@app.post("/prova-ativa/falta", response_model=schemas.FaltasRecusasResponse)
+def add_falta():
+    if not chrono.add_falta():
+        raise HTTPException(status_code=409, detail="Estado inválido para adicionar falta")
+    e = chrono.get_estado_completo()
+    return {"faltas": e["faltas"], "recusas": e["recusas"]}
+
+
+@app.post("/prova-ativa/desfazer-falta", response_model=schemas.FaltasRecusasResponse)
+def remove_falta():
+    if not chrono.remove_falta():
+        raise HTTPException(status_code=409, detail="Não é possível remover falta")
+    e = chrono.get_estado_completo()
+    return {"faltas": e["faltas"], "recusas": e["recusas"]}
+
+
+@app.post("/prova-ativa/recusa", response_model=schemas.FaltasRecusasResponse)
+def add_recusa():
+    if not chrono.add_recusa():
+        raise HTTPException(status_code=409, detail="Estado inválido para adicionar recusa")
+    e = chrono.get_estado_completo()
+    return {"faltas": e["faltas"], "recusas": e["recusas"]}
+
+
+@app.post("/prova-ativa/desfazer-recusa", response_model=schemas.FaltasRecusasResponse)
+def remove_recusa():
+    if not chrono.remove_recusa():
+        raise HTTPException(status_code=409, detail="Não é possível remover recusa")
+    e = chrono.get_estado_completo()
+    return {"faltas": e["faltas"], "recusas": e["recusas"]}
+
+
+@app.post("/prova-ativa/forcar-fim", response_model=schemas.ProvaAtivaEstado)
+def forcar_fim():
+    if not chrono.forcar_fim():
+        raise HTTPException(status_code=409, detail="Estado inválido para forçar fim")
+    return chrono.get_estado_completo()
+
+
+@app.post("/prova-ativa/confirmar")
+def confirmar_prova(db: Session = Depends(get_db)):
+    dados = chrono.get_dados_confirmacao()
+    if dados is None:
+        raise HTTPException(status_code=409, detail="Prova não está finalizada")
+
+    # Persiste cronometragem TOP
+    crono_top = schemas.CronometragemCreate(
+        id_inscricao=dados["id_inscricao"],
+        tempo_inicial=dados["hora_inicio_prova"],
+        tempo_final=dados["hora_fim_prova"],
+        status="finalizado",
+        tipo="prova",
+        tempo_oficial=dados["top"],
+    )
+    crud.create_cronometro(db, crono_top)
+
+    # Persiste cronometragem TIA
+    crono_tia = schemas.CronometragemCreate(
+        id_inscricao=dados["id_inscricao"],
+        tempo_inicial=dados["hora_autorizacao"],
+        tempo_final=dados["hora_inicio_prova"],
+        status="finalizado",
+        tipo="tia",
+        tempo_oficial=dados["tia"],
+    )
+    crud.create_cronometro(db, crono_tia)
+
+    # Atualiza inscrição
+    inscricao_update = schemas.InscricaoUpdate(
+        tempo_prova=dados["top"],
+        faltas_prova=dados["faltas"],
+        recusas_prova=dados["recusas"],
+        status="finalizado",
+    )
+    crud.update_inscricao(db, dados["id_inscricao"], inscricao_update)
+
+    chrono.reset()
+    return {"ok": True, "top": dados["top"], "tia": dados["tia"]}
+
+
+@app.post("/prova-ativa/reset", response_model=schemas.ProvaAtivaEstado)
+def reset_prova():
+    chrono.reset()
+    return chrono.get_estado_completo()
+
+
+@app.post("/prova-ativa/simular-sensor", response_model=schemas.ProvaAtivaEstado)
+def simular_sensor():
+    chrono.simular_acionamento()
+    return chrono.get_estado_completo()
+
+
+# ────────────────── Interfaces HTML ──────────────────
+
+@app.get("/painel", response_class=HTMLResponse)
+def painel():
+    html_path = STATIC_DIR / "painel.html"
+    if not html_path.is_file():
+        raise HTTPException(status_code=404, detail="painel.html não encontrado")
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/operador", response_class=HTMLResponse)
+def operador():
+    html_path = STATIC_DIR / "operador.html"
+    if not html_path.is_file():
+        raise HTTPException(status_code=404, detail="operador.html não encontrado")
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    chrono.cleanup()

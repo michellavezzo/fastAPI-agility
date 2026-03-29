@@ -6,12 +6,17 @@ from pydantic import BaseModel, field_validator
 class UserCreate(BaseModel):
     name: str
     email: str
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+
 class UserResponse(BaseModel):
     id: int
     name: str
     email: str
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 # Competition Schemas
 class CompeticaoCreate(BaseModel):
@@ -69,8 +74,8 @@ class ProvaUpdate(BaseModel):
     categoria: Optional[str] = None
     classe: Optional[str] = None
     num_obstaculos: Optional[int] = None
-    tsp: Optional[int] = None
-    tmp: Optional[int] = None
+    tsp: Optional[float] = None
+    tmp: Optional[float] = None
     vel_media_necessaria: Optional[float] = None
     comprimento_pista: Optional[int] = None
     descricao: Optional[str] = None
@@ -80,8 +85,8 @@ class ProvaResponse(BaseModel):
     categoria: str
     classe: str
     num_obstaculos: int
-    tsp: int
-    tmp: int
+    tsp: float
+    tmp: float
     vel_media_necessaria: float
     comprimento_pista: int
     descricao: Optional[str] = None
@@ -267,6 +272,7 @@ class CronometragemCreate(BaseModel):
     tempo_final: Optional[str] = None
     status: str = "parado"
     tempo_oficial: Optional[float] = None
+    tipo: str = "prova"
 
 class CronometragemUpdate(BaseModel):
     id_inscricao: Optional[int] = None
@@ -281,6 +287,7 @@ class CronometragemResponse(BaseModel):
     tempo_inicial: str
     tempo_final: Optional[str] = None
     status: str
+    tipo: str
     tempo_oficial: Optional[float] = None
     criado_em: Optional[str] = None
     atualizado_em: Optional[str] = None
@@ -293,3 +300,33 @@ class CronometragemResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+# Prova Ativa
+
+class ProvaAtivaPreparar(BaseModel):
+    id_inscricao: int
+
+class ProvaAtivaEstado(BaseModel):
+    estado: str
+    id_inscricao: Optional[int] = None
+    tia_decorrido: float = 0.0
+    tia_str: str = "--:--.---"
+    top_decorrido: float = 0.0
+    top_str: str = "--:--.---"
+    tempo_oficial: Optional[float] = None
+    faltas: int = 0
+    recusas: int = 0
+    competidor_nome: Optional[str] = None
+    cao_nome: Optional[str] = None
+    cao_raca: Optional[str] = None
+    colete_competidor: Optional[str] = None
+    categoria: Optional[str] = None
+    classe: Optional[str] = None
+    num_obstaculos: Optional[int] = None
+    comprimento_pista: Optional[int] = None
+    tsp: Optional[float] = None
+    tmp: Optional[float] = None
+
+class FaltasRecusasResponse(BaseModel):
+    faltas: int
+    recusas: int
