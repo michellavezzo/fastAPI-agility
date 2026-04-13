@@ -6,11 +6,46 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
+from sqlalchemy import inspect as sa_inspect, text
+
 from . import crud, models, schemas
 from .chrono import Chronometer
 from .database import engine, get_db
 
 models.Base.metadata.create_all(bind=engine)
+
+
+def _sync_missing_columns():
+    """Adiciona colunas que existem no modelo SQLAlchemy mas faltam no SQLite.
+    Para colunas recém-adicionadas, preenche NULLs com o default do modelo.
+    Substitui Alembic para prototipagem — seguro para desenvolvimento do TCC."""
+    inspector = sa_inspect(engine)
+    for table_name, table in models.Base.metadata.tables.items():
+        if not inspector.has_table(table_name):
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table_name)}
+        for col in table.columns:
+            if col.name not in existing:
+                col_type = col.type.compile(engine.dialect)
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        f'ALTER TABLE "{table_name}" ADD COLUMN "{col.name}" {col_type}'
+                    ))
+                    if col.default is not None:
+                        default_val = col.default.arg
+                        conn.execute(text(
+                            f'UPDATE "{table_name}" SET "{col.name}" = :val WHERE "{col.name}" IS NULL'
+                        ), {"val": default_val})
+            else:
+                # Backfill NULLs for columns that have a model default
+                if col.default is not None:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            f'UPDATE "{table_name}" SET "{col.name}" = :val WHERE "{col.name}" IS NULL'
+                        ), {"val": col.default.arg})
+
+
+_sync_missing_columns()
 
 app = FastAPI()
 
