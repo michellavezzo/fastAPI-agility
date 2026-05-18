@@ -17,6 +17,12 @@ except ImportError:
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
+if GPIO is None:
+    logging.warning("RPi.GPIO indisponivel. Hardware GPIO/IR nao sera inicializado.")
+
+if pigpio is None:
+    logging.info("pigpio indisponivel. PWM do emissor IR usara RPi.GPIO se GPIO estiver disponivel.")
+
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
 IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "38000"))
@@ -56,6 +62,10 @@ class Chronometer:
         self._ir_pwm = None
         self._pigpio = None
         self._using_pigpio_pwm = False
+        self._gpio_ready = False
+        self._ir_emitter_active = False
+        self._ir_emitter_mode = None
+        self._ir_emitter_error = None
         self.debounce_time = debounce_time
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
@@ -80,7 +90,11 @@ class Chronometer:
         self._recusas = 0
 
         # GPIO
-        if GPIO and self.ir_pin:
+        if not GPIO:
+            logging.warning("Cronometro iniciado em modo sem GPIO. Sensor e emissor IR inativos.")
+        elif not self.ir_pin:
+            logging.warning("Pino do sensor IR nao configurado. GPIO nao inicializado.")
+        else:
             GPIO.setmode(GPIO.BCM)
 
             if self.ir_emitter_enabled and self.ir_led_pin == self.ir_pin:
@@ -95,10 +109,23 @@ class Chronometer:
                 callback=self._ir_callback,
                 bouncetime=int(self.debounce_time * 1000)
             )
+            self._gpio_ready = True
             logging.info(f"GPIO {self.ir_pin} configurado com pull-up interno.")
 
     def _start_ir_emitter(self):
-        if not (GPIO and self.ir_emitter_enabled and self.ir_led_pin):
+        if not GPIO:
+            self._ir_emitter_error = "RPi.GPIO indisponivel"
+            logging.warning("Emissor IR nao inicializado: RPi.GPIO indisponivel.")
+            return
+
+        if not self.ir_emitter_enabled:
+            self._ir_emitter_error = "emissor desabilitado por configuracao"
+            logging.warning("Emissor IR desabilitado por configuracao.")
+            return
+
+        if not self.ir_led_pin:
+            self._ir_emitter_error = "pino do emissor nao configurado"
+            logging.warning("Emissor IR nao inicializado: pino nao configurado.")
             return
 
         duty_cycle = max(0, min(100, self.ir_duty_cycle))
@@ -112,6 +139,9 @@ class Chronometer:
                     int(duty_cycle * 10000),
                 )
                 self._using_pigpio_pwm = True
+                self._ir_emitter_active = True
+                self._ir_emitter_mode = "pigpio.hardware_PWM"
+                self._ir_emitter_error = None
                 logging.info(
                     f"LED IR em GPIO {self.ir_led_pin} com PWM hardware "
                     f"{self.ir_frequency}Hz e duty {duty_cycle}%."
@@ -124,6 +154,9 @@ class Chronometer:
         GPIO.setup(self.ir_led_pin, GPIO.OUT, initial=GPIO.LOW)
         self._ir_pwm = GPIO.PWM(self.ir_led_pin, self.ir_frequency)
         self._ir_pwm.start(duty_cycle)
+        self._ir_emitter_active = True
+        self._ir_emitter_mode = "RPi.GPIO.PWM"
+        self._ir_emitter_error = None
         logging.info(
             f"LED IR em GPIO {self.ir_led_pin} com PWM {self.ir_frequency}Hz "
             f"e duty {duty_cycle}%."
@@ -274,6 +307,20 @@ class Chronometer:
             }
             result.update(self._dados_inscricao)
             return result
+
+    def get_hardware_status(self):
+        return {
+            "gpio_disponivel": GPIO is not None,
+            "gpio_pronto": self._gpio_ready,
+            "sensor_gpio_bcm": self.ir_pin,
+            "emissor_habilitado": self.ir_emitter_enabled,
+            "emissor_gpio_bcm": self.ir_led_pin,
+            "emissor_ativo": self._ir_emitter_active,
+            "emissor_modo": self._ir_emitter_mode,
+            "emissor_erro": self._ir_emitter_error,
+            "frequencia_hz": self.ir_frequency,
+            "duty_cycle": self.ir_duty_cycle,
+        }
 
     def get_dados_confirmacao(self):
         with self._lock:

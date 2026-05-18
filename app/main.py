@@ -60,6 +60,11 @@ app.add_middleware(
 chrono = Chronometer()
 STATIC_DIR = FilePath(__file__).resolve().parent.parent / "static"
 
+
+@app.get("/hardware/estado")
+def hardware_estado():
+    return chrono.get_hardware_status()
+
 #  Usuários
 
 @app.post("/users/", response_model=schemas.UserResponse)
