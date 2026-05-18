@@ -2,16 +2,35 @@ import time
 import os
 import threading
 import logging
+import importlib
 from datetime import datetime
 
 try:
-    import RPi.GPIO as GPIO
+    GPIO = importlib.import_module("RPi.GPIO")
 except ImportError:
     GPIO = None
+
+try:
+    pigpio = importlib.import_module("pigpio")
+except ImportError:
+    pigpio = None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
+IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "38000"))
+IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
+
+
+def _env_bool(name, default=True):
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+IR_EMITTER_ENABLED_DEFAULT = _env_bool("AGILITY_IR_EMITTER_ENABLED", True)
 
 
 class Chronometer:
@@ -20,8 +39,23 @@ class Chronometer:
     - TOP (Tempo Oficial da Prova): do 1o ao 2o acionamento do sensor/botão
     """
 
-    def __init__(self, ir_pin=None, debounce_time=0.3):
+    def __init__(
+        self,
+        ir_pin=None,
+        debounce_time=0.3,
+        ir_led_pin=None,
+        ir_frequency=IR_FREQUENCY_DEFAULT,
+        ir_duty_cycle=IR_DUTY_CYCLE_DEFAULT,
+        ir_emitter_enabled=IR_EMITTER_ENABLED_DEFAULT,
+    ):
         self.ir_pin = ir_pin if ir_pin is not None else GPIO_PIN_DEFAULT
+        self.ir_led_pin = ir_led_pin if ir_led_pin is not None else IR_LED_PIN_DEFAULT
+        self.ir_frequency = ir_frequency
+        self.ir_duty_cycle = ir_duty_cycle
+        self.ir_emitter_enabled = ir_emitter_enabled
+        self._ir_pwm = None
+        self._pigpio = None
+        self._using_pigpio_pwm = False
         self.debounce_time = debounce_time
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
@@ -48,6 +82,13 @@ class Chronometer:
         # GPIO
         if GPIO and self.ir_pin:
             GPIO.setmode(GPIO.BCM)
+
+            if self.ir_emitter_enabled and self.ir_led_pin == self.ir_pin:
+                logging.warning("GPIO do emissor IR igual ao sensor. Emissor desabilitado.")
+                self.ir_emitter_enabled = False
+
+            self._start_ir_emitter()
+
             GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
             GPIO.add_event_detect(
                 self.ir_pin, GPIO.FALLING,
@@ -55,6 +96,38 @@ class Chronometer:
                 bouncetime=int(self.debounce_time * 1000)
             )
             logging.info(f"GPIO {self.ir_pin} configurado com pull-up interno.")
+
+    def _start_ir_emitter(self):
+        if not (GPIO and self.ir_emitter_enabled and self.ir_led_pin):
+            return
+
+        duty_cycle = max(0, min(100, self.ir_duty_cycle))
+
+        if pigpio is not None:
+            self._pigpio = pigpio.pi()
+            if self._pigpio.connected:
+                self._pigpio.hardware_PWM(
+                    self.ir_led_pin,
+                    self.ir_frequency,
+                    int(duty_cycle * 10000),
+                )
+                self._using_pigpio_pwm = True
+                logging.info(
+                    f"LED IR em GPIO {self.ir_led_pin} com PWM hardware "
+                    f"{self.ir_frequency}Hz e duty {duty_cycle}%."
+                )
+                return
+
+            self._pigpio = None
+            logging.warning("pigpio indisponivel. Usando PWM via RPi.GPIO.")
+
+        GPIO.setup(self.ir_led_pin, GPIO.OUT, initial=GPIO.LOW)
+        self._ir_pwm = GPIO.PWM(self.ir_led_pin, self.ir_frequency)
+        self._ir_pwm.start(duty_cycle)
+        logging.info(
+            f"LED IR em GPIO {self.ir_led_pin} com PWM {self.ir_frequency}Hz "
+            f"e duty {duty_cycle}%."
+        )
 
     def _ir_callback(self, channel):
         now = time.perf_counter()
@@ -218,5 +291,14 @@ class Chronometer:
             }
 
     def cleanup(self):
-        if GPIO and self.ir_pin:
-            GPIO.cleanup(self.ir_pin)
+        if self._using_pigpio_pwm and self._pigpio is not None:
+            self._pigpio.hardware_PWM(self.ir_led_pin, 0, 0)
+            self._pigpio.stop()
+
+        if self._ir_pwm is not None:
+            self._ir_pwm.stop()
+
+        if GPIO:
+            pins = list({pin for pin in (self.ir_pin, self.ir_led_pin) if pin})
+            if pins:
+                GPIO.cleanup(pins)
