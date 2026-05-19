@@ -4,6 +4,12 @@ import sys
 import time
 
 
+SYSTEM_DIST_PACKAGES = (
+    "/usr/lib/python3/dist-packages",
+    "/usr/local/lib/python3/dist-packages",
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Testa receptor IR lendo GPIO bruto e varrendo frequencias do emissor."
@@ -32,18 +38,41 @@ def parse_args():
 def load_gpio():
     try:
         import RPi.GPIO as GPIO
+        return GPIO
     except Exception as exc:
-        print(f"ERRO: nao foi possivel importar RPi.GPIO: {type(exc).__name__}: {exc}")
-        print("Instale no Raspberry Pi com: sudo apt install python3-rpi.gpio")
-        raise SystemExit(1)
-    return GPIO
+        first_error = exc
+
+    for path in SYSTEM_DIST_PACKAGES:
+        if path not in sys.path:
+            sys.path.append(path)
+        try:
+            import RPi.GPIO as GPIO
+            print(f"RPi.GPIO carregado via pacote do sistema: {path}")
+            return GPIO
+        except Exception:
+            continue
+
+    print(f"ERRO: nao foi possivel importar RPi.GPIO: {type(first_error).__name__}: {first_error}")
+    print("O pacote APT pode estar instalado, mas fora do caminho do venv.")
+    print("Tente: PYTHONPATH=/usr/lib/python3/dist-packages python rasp_scripts/testar_sensor_ir.py")
+    print("Ou rode com o Python do sistema: /usr/bin/python3 rasp_scripts/testar_sensor_ir.py")
+    raise SystemExit(1)
 
 
 def load_pigpio():
     try:
         import pigpio
     except Exception:
-        return None
+        for path in SYSTEM_DIST_PACKAGES:
+            if path not in sys.path:
+                sys.path.append(path)
+            try:
+                import pigpio
+                break
+            except Exception:
+                pigpio = None
+        if pigpio is None:
+            return None
     pi = pigpio.pi()
     if not pi.connected:
         return None
