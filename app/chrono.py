@@ -3,25 +3,99 @@ import os
 import threading
 import logging
 import importlib
+import platform
+import sys
 from datetime import datetime
+from pathlib import Path
 
-try:
-    GPIO = importlib.import_module("RPi.GPIO")
-except ImportError:
-    GPIO = None
-
-try:
-    pigpio = importlib.import_module("pigpio")
-except ImportError:
-    pigpio = None
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 
+
+def _detect_raspberry_pi():
+    for model_path in (
+        Path("/proc/device-tree/model"),
+        Path("/sys/firmware/devicetree/base/model"),
+    ):
+        try:
+            model = model_path.read_text(errors="ignore").replace("\x00", "").strip()
+        except OSError:
+            continue
+
+        if model:
+            return "raspberry pi" in model.lower(), model
+
+    machine = platform.machine()
+    return False, machine
+
+
+def _system_dist_package_paths():
+    py_version = f"python{sys.version_info.major}.{sys.version_info.minor}"
+    candidates = (
+        Path("/usr/lib/python3/dist-packages"),
+        Path("/usr/local/lib/python3/dist-packages"),
+        Path("/usr/lib") / py_version / "dist-packages",
+        Path("/usr/local/lib") / py_version / "dist-packages",
+    )
+
+    for candidate in candidates:
+        if candidate.exists():
+            yield candidate
+
+
+def _import_optional_hardware_module(module_name):
+    last_error = None
+
+    try:
+        return importlib.import_module(module_name), None, "python"
+    except Exception as exc:
+        last_error = exc
+
+    # Venvs normally hide apt-installed Raspberry Pi packages. Try the system
+    # dist-packages paths so python3-rpi.gpio/python3-pigpio can still be used.
+    for package_path in _system_dist_package_paths():
+        package_path_str = str(package_path)
+        if package_path_str not in sys.path:
+            sys.path.append(package_path_str)
+
+        try:
+            return importlib.import_module(module_name), None, package_path_str
+        except Exception as exc:
+            last_error = exc
+
+    return None, f"{type(last_error).__name__}: {last_error}", None
+
+
+IS_RASPBERRY_PI, RASPBERRY_PI_MODEL = _detect_raspberry_pi()
+GPIO, GPIO_IMPORT_ERROR, GPIO_IMPORT_SOURCE = _import_optional_hardware_module("RPi.GPIO")
+pigpio, PIGPIO_IMPORT_ERROR, PIGPIO_IMPORT_SOURCE = _import_optional_hardware_module("pigpio")
+
 if GPIO is None:
-    logging.warning("RPi.GPIO indisponivel. Hardware GPIO/IR nao sera inicializado.")
+    logging.warning(
+        "RPi.GPIO indisponivel no Python %s. Hardware GPIO/IR nao sera inicializado. "
+        "Ambiente: %s. Erro: %s",
+        sys.executable,
+        RASPBERRY_PI_MODEL,
+        GPIO_IMPORT_ERROR,
+    )
+    if IS_RASPBERRY_PI:
+        logging.warning(
+            "Na Raspberry Pi, instale os pacotes no sistema ou recrie a venv com acesso a eles: "
+            "sudo apt install python3-rpi.gpio. "
+            "O pigpio e opcional; se nao existir no APT desta imagem, o emissor IR usa RPi.GPIO.PWM."
+        )
+else:
+    logging.info("RPi.GPIO carregado via %s.", GPIO_IMPORT_SOURCE)
 
 if pigpio is None:
-    logging.info("pigpio indisponivel. PWM do emissor IR usara RPi.GPIO se GPIO estiver disponivel.")
+    logging.info(
+        "pigpio indisponivel no Python %s. PWM do emissor IR usara RPi.GPIO se GPIO estiver disponivel. "
+        "Erro: %s",
+        sys.executable,
+        PIGPIO_IMPORT_ERROR,
+    )
+else:
+    logging.info("pigpio carregado via %s.", PIGPIO_IMPORT_SOURCE)
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
@@ -66,6 +140,7 @@ class Chronometer:
         self._ir_emitter_active = False
         self._ir_emitter_mode = None
         self._ir_emitter_error = None
+        self._gpio_error = None
         self.debounce_time = debounce_time
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
@@ -91,26 +166,39 @@ class Chronometer:
 
         # GPIO
         if not GPIO:
-            logging.warning("Cronometro iniciado em modo sem GPIO. Sensor e emissor IR inativos.")
+            self._gpio_error = f"RPi.GPIO indisponivel: {GPIO_IMPORT_ERROR}"
+            self._ir_emitter_error = self._gpio_error
+            logging.warning(
+                "Cronometro iniciado em modo sem GPIO. Sensor e emissor IR inativos. "
+                "Python em uso: %s",
+                sys.executable,
+            )
         elif not self.ir_pin:
+            self._gpio_error = "pino do sensor IR nao configurado"
             logging.warning("Pino do sensor IR nao configurado. GPIO nao inicializado.")
         else:
-            GPIO.setmode(GPIO.BCM)
+            try:
+                GPIO.setwarnings(False)
+                GPIO.setmode(GPIO.BCM)
 
-            if self.ir_emitter_enabled and self.ir_led_pin == self.ir_pin:
-                logging.warning("GPIO do emissor IR igual ao sensor. Emissor desabilitado.")
-                self.ir_emitter_enabled = False
+                if self.ir_emitter_enabled and self.ir_led_pin == self.ir_pin:
+                    logging.warning("GPIO do emissor IR igual ao sensor. Emissor desabilitado.")
+                    self.ir_emitter_enabled = False
 
-            self._start_ir_emitter()
+                self._start_ir_emitter()
 
-            GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-            GPIO.add_event_detect(
-                self.ir_pin, GPIO.FALLING,
-                callback=self._ir_callback,
-                bouncetime=int(self.debounce_time * 1000)
-            )
-            self._gpio_ready = True
-            logging.info(f"GPIO {self.ir_pin} configurado com pull-up interno.")
+                GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+                GPIO.add_event_detect(
+                    self.ir_pin, GPIO.FALLING,
+                    callback=self._ir_callback,
+                    bouncetime=int(self.debounce_time * 1000)
+                )
+                self._gpio_ready = True
+                logging.info(f"GPIO {self.ir_pin} configurado com pull-up interno.")
+            except Exception as exc:
+                self._gpio_ready = False
+                self._gpio_error = f"{type(exc).__name__}: {exc}"
+                logging.exception("Falha ao inicializar GPIO do cronometro.")
 
     def _start_ir_emitter(self):
         if not GPIO:
@@ -131,36 +219,45 @@ class Chronometer:
         duty_cycle = max(0, min(100, self.ir_duty_cycle))
 
         if pigpio is not None:
-            self._pigpio = pigpio.pi()
-            if self._pigpio.connected:
-                self._pigpio.hardware_PWM(
-                    self.ir_led_pin,
-                    self.ir_frequency,
-                    int(duty_cycle * 10000),
-                )
-                self._using_pigpio_pwm = True
-                self._ir_emitter_active = True
-                self._ir_emitter_mode = "pigpio.hardware_PWM"
-                self._ir_emitter_error = None
-                logging.info(
-                    f"LED IR em GPIO {self.ir_led_pin} com PWM hardware "
-                    f"{self.ir_frequency}Hz e duty {duty_cycle}%."
-                )
-                return
+            try:
+                self._pigpio = pigpio.pi()
+                if self._pigpio.connected:
+                    self._pigpio.hardware_PWM(
+                        self.ir_led_pin,
+                        self.ir_frequency,
+                        int(duty_cycle * 10000),
+                    )
+                    self._using_pigpio_pwm = True
+                    self._ir_emitter_active = True
+                    self._ir_emitter_mode = "pigpio.hardware_PWM"
+                    self._ir_emitter_error = None
+                    logging.info(
+                        f"LED IR em GPIO {self.ir_led_pin} com PWM hardware "
+                        f"{self.ir_frequency}Hz e duty {duty_cycle}%."
+                    )
+                    return
 
-            self._pigpio = None
-            logging.warning("pigpio indisponivel. Usando PWM via RPi.GPIO.")
+                self._pigpio = None
+                logging.warning("pigpio importado, mas daemon pigpiod nao conectado. Usando PWM via RPi.GPIO.")
+            except Exception as exc:
+                self._pigpio = None
+                logging.warning("Falha ao iniciar PWM via pigpio: %s. Usando PWM via RPi.GPIO.", exc)
 
-        GPIO.setup(self.ir_led_pin, GPIO.OUT, initial=GPIO.LOW)
-        self._ir_pwm = GPIO.PWM(self.ir_led_pin, self.ir_frequency)
-        self._ir_pwm.start(duty_cycle)
-        self._ir_emitter_active = True
-        self._ir_emitter_mode = "RPi.GPIO.PWM"
-        self._ir_emitter_error = None
-        logging.info(
-            f"LED IR em GPIO {self.ir_led_pin} com PWM {self.ir_frequency}Hz "
-            f"e duty {duty_cycle}%."
-        )
+        try:
+            GPIO.setup(self.ir_led_pin, GPIO.OUT, initial=GPIO.LOW)
+            self._ir_pwm = GPIO.PWM(self.ir_led_pin, self.ir_frequency)
+            self._ir_pwm.start(duty_cycle)
+            self._ir_emitter_active = True
+            self._ir_emitter_mode = "RPi.GPIO.PWM"
+            self._ir_emitter_error = None
+            logging.info(
+                f"LED IR em GPIO {self.ir_led_pin} com PWM {self.ir_frequency}Hz "
+                f"e duty {duty_cycle}%."
+            )
+        except Exception as exc:
+            self._ir_emitter_active = False
+            self._ir_emitter_error = f"{type(exc).__name__}: {exc}"
+            logging.exception("Falha ao inicializar emissor IR.")
 
     def _ir_callback(self, channel):
         now = time.perf_counter()
@@ -310,9 +407,19 @@ class Chronometer:
 
     def get_hardware_status(self):
         return {
+            "raspberry_pi": IS_RASPBERRY_PI,
+            "raspberry_modelo": RASPBERRY_PI_MODEL,
+            "python_executavel": sys.executable,
+            "python_prefixo": sys.prefix,
             "gpio_disponivel": GPIO is not None,
+            "gpio_import_origem": GPIO_IMPORT_SOURCE,
+            "gpio_import_erro": GPIO_IMPORT_ERROR,
             "gpio_pronto": self._gpio_ready,
+            "gpio_erro": self._gpio_error,
             "sensor_gpio_bcm": self.ir_pin,
+            "pigpio_disponivel": pigpio is not None,
+            "pigpio_import_origem": PIGPIO_IMPORT_SOURCE,
+            "pigpio_import_erro": PIGPIO_IMPORT_ERROR,
             "emissor_habilitado": self.ir_emitter_enabled,
             "emissor_gpio_bcm": self.ir_led_pin,
             "emissor_ativo": self._ir_emitter_active,
