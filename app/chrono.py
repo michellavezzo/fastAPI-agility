@@ -99,7 +99,7 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "30000"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "31000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
@@ -107,6 +107,8 @@ SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVA
 SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
 SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "auto").strip().lower()
 SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.002"))
+SENSOR_READY_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_CONFIRM", "0.05"))
+SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.8"))
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
@@ -148,6 +150,8 @@ class Chronometer:
         sensor_read_mode=SENSOR_READ_MODE_DEFAULT,
         sensor_require_ready=SENSOR_REQUIRE_READY_DEFAULT,
         sensor_trigger_confirm_time=SENSOR_TRIGGER_CONFIRM_DEFAULT,
+        sensor_ready_confirm_time=SENSOR_READY_CONFIRM_DEFAULT,
+        sensor_ready_min_ratio=SENSOR_READY_MIN_RATIO_DEFAULT,
         sensor_ignored_log_interval=SENSOR_IGNORED_LOG_INTERVAL_DEFAULT,
     ):
         self.ir_pin = ir_pin if ir_pin is not None else GPIO_PIN_DEFAULT
@@ -158,6 +162,8 @@ class Chronometer:
         self.sensor_poll_interval = max(0.001, float(sensor_poll_interval))
         self.sensor_rearm_stable_time = max(0.001, float(sensor_rearm_stable_time))
         self.sensor_trigger_confirm_time = max(0.0, float(sensor_trigger_confirm_time))
+        self.sensor_ready_confirm_time = max(0.0, float(sensor_ready_confirm_time))
+        self.sensor_ready_min_ratio = max(0.0, min(1.0, float(sensor_ready_min_ratio)))
         self.sensor_require_rearm = _bool_value(sensor_require_rearm, False)
         self.sensor_require_ready = _bool_value(sensor_require_ready, True)
         self.sensor_read_mode = str(sensor_read_mode).strip().lower()
@@ -199,6 +205,7 @@ class Chronometer:
         self._sensor_last_accepted_event = None
         self._sensor_transition_count = 0
         self._sensor_last_transition = None
+        self._sensor_last_ready_check = None
         self._last_authorize_error = None
         self.debounce_time = max(0.001, float(debounce_time))
         self._lock = threading.RLock()
@@ -404,13 +411,17 @@ class Chronometer:
 
     def _sensor_ready_to_start_locked(self, now=None):
         if not self._gpio_ready or self._last_sensor_level is None:
+            self._sensor_last_ready_check = None
             return True
-        if self._last_sensor_level != self._sensor_inactive_level():
-            return False
-        if self._sensor_high_since is None:
-            return True
-        now = now if now is not None else time.perf_counter()
-        return now - self._sensor_high_since >= self.sensor_rearm_stable_time
+
+        ready_stats = self._sample_sensor_level_locked(
+            expected_level=self._sensor_inactive_level(),
+            duration=self.sensor_ready_confirm_time,
+        )
+        self._sensor_last_ready_check = ready_stats
+        if ready_stats is None:
+            return self._last_sensor_level == self._sensor_inactive_level()
+        return ready_stats["expected_ratio"] >= self.sensor_ready_min_ratio
 
     def _sensor_edge(self):
         return GPIO.RISING if self.sensor_active_level == "HIGH" else GPIO.FALLING
@@ -432,6 +443,58 @@ class Chronometer:
         if previous_level is not None and current_level != previous_level:
             self._record_sensor_transition_locked(previous_level, current_level)
         self._update_sensor_rearm_locked(current_level, now)
+
+    def _sample_sensor_level_locked(self, expected_level, duration):
+        if GPIO is None or not self._gpio_ready:
+            return None
+
+        samples = 0
+        expected_samples = 0
+        high_samples = 0
+        low_samples = 0
+        transitions = 0
+        first_level = None
+        previous_level = self._last_sensor_level
+        deadline = time.perf_counter() + duration
+        interval = max(0.001, min(self.sensor_poll_interval, 0.005))
+
+        while True:
+            current_level = GPIO.input(self.ir_pin)
+            now = time.perf_counter()
+            self._refresh_sensor_level_locked(current_level, now)
+
+            if first_level is None:
+                first_level = current_level
+            if previous_level is not None and current_level != previous_level:
+                transitions += 1
+            previous_level = current_level
+
+            samples += 1
+            if current_level == expected_level:
+                expected_samples += 1
+            if current_level == self._gpio_high():
+                high_samples += 1
+            else:
+                low_samples += 1
+
+            if now >= deadline:
+                break
+            time.sleep(interval)
+
+        expected_ratio = expected_samples / samples if samples else 0
+        return {
+            "expected_level": expected_level,
+            "expected_ratio": round(expected_ratio, 3),
+            "samples": samples,
+            "high": high_samples,
+            "low": low_samples,
+            "transitions": transitions,
+            "first": first_level,
+            "last": previous_level,
+            "duration": duration,
+            "min_ratio": self.sensor_ready_min_ratio,
+            "hora": datetime.now().isoformat(),
+        }
 
     def _start_ir_emitter(self):
         if not GPIO:
@@ -617,11 +680,13 @@ class Chronometer:
                     "Feixe IR não alinhado. Ajuste emissor/receptor antes de autorizar a largada."
                 )
                 logging.warning(
-                    "%s Nivel atual: %s (%s). Nivel esperado livre/alinhado: %s.",
+                    "%s Nivel atual: %s (%s). Nivel esperado livre/alinhado: %s. "
+                    "Amostra pronto: %s.",
                     self._last_authorize_error,
                     self._last_sensor_level,
                     self._sensor_level_status(self._last_sensor_level),
                     self._sensor_inactive_level(),
+                    self._sensor_last_ready_check,
                 )
                 return False
 
@@ -775,6 +840,9 @@ class Chronometer:
             "sensor_debounce": self.debounce_time,
             "sensor_rearm_stable": self.sensor_rearm_stable_time,
             "sensor_trigger_confirm": self.sensor_trigger_confirm_time,
+            "sensor_ready_confirm": self.sensor_ready_confirm_time,
+            "sensor_ready_min_ratio": self.sensor_ready_min_ratio,
+            "sensor_ultima_amostra_pronto": self._sensor_last_ready_check,
             "sensor_require_rearm": self.sensor_require_rearm,
             "sensor_require_ready": self.sensor_require_ready,
             "sensor_armado": self._sensor_armed,
