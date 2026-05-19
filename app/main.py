@@ -392,7 +392,10 @@ def preparar_prova(body: schemas.ProvaAtivaPreparar, db: Session = Depends(get_d
 def autorizar_prova():
     chrono = get_chrono()
     if not chrono.autorizar():
-        raise HTTPException(status_code=409, detail="Estado inválido para autorizar")
+        raise HTTPException(
+            status_code=409,
+            detail=chrono.get_last_authorize_error() or "Estado inválido para autorizar",
+        )
     return chrono.get_estado_completo()
 
 
