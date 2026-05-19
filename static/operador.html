@@ -111,16 +111,24 @@ button:disabled{opacity:.3;cursor:not-allowed}
 </div>
 
 <script>
-const POLL_MS = 250;
+const POLL_MS = 100;
 const ESTADO_LABELS = {idle:'Aguardando',preparado:'Preparado',autorizado:'Autorizado',rodando:'Em Prova',finalizado:'Finalizado'};
 let lastSnapshot = null;
 let lastSnapshotTime = 0;
+let eventStreamActive = false;
 
 function formatTime(s){const m=Math.floor(s/60);const sec=Math.floor(s%60);const ms=Math.floor((s-Math.floor(s))*1000);return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;}
 function interpolate(base,at){if(!base)return{tia:'00:00.000',top:'00:00.000'};const el=(performance.now()-at)/1000;let tia=base.tia_decorrido,top=base.top_decorrido;if(base.estado==='autorizado')tia+=el;if(base.estado==='rodando')top+=el;return{tia:formatTime(tia),top:formatTime(top)};}
 
 const $ = id => document.getElementById(id);
-const postJson = (url, body) => fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):'{}'});
+async function postJson(url, body) {
+  const r = await fetch(url, {method:'POST',headers:{'Content-Type':'application/json'},cache:'no-store',body:body?JSON.stringify(body):'{}'});
+  if (r.ok) {
+    const data = await r.clone().json().catch(()=>null);
+    if (data && data.estado) setSnapshot(data);
+  }
+  return r;
+}
 
 async function loadInscricoes(){
   try {
@@ -170,6 +178,14 @@ function applyState(d){
   updateButtons(d.estado);
 }
 
+function setSnapshot(d){
+  if(!d)return;
+  if(lastSnapshot && d.versao!=null && lastSnapshot.versao!=null && d.versao < lastSnapshot.versao)return;
+  lastSnapshot=d;
+  lastSnapshotTime=performance.now();
+  applyState(d);
+}
+
 function renderFrame(){
   const v=interpolate(lastSnapshot,lastSnapshotTime);
   $('topTimer').textContent=v.top;
@@ -179,10 +195,19 @@ function renderFrame(){
 
 async function poll(){
   try{
-    const r=await fetch('/prova-ativa/estado');
-    if(r.ok){const d=await r.json();lastSnapshot=d;lastSnapshotTime=performance.now();applyState(d);}
+    const r=await fetch('/prova-ativa/estado',{cache:'no-store'});
+    if(r.ok) setSnapshot(await r.json());
   }catch(_){}
   setTimeout(poll,POLL_MS);
+}
+
+function connectEvents(){
+  if(!window.EventSource)return;
+  const es = new EventSource('/prova-ativa/events');
+  es.onopen = ()=>{eventStreamActive=true;};
+  es.onerror = ()=>{eventStreamActive=false;};
+  es.addEventListener('estado', ev=>setSnapshot(JSON.parse(ev.data)));
+  es.onmessage = ev=>setSnapshot(JSON.parse(ev.data));
 }
 
 $('btnPreparar').onclick = async()=>{
@@ -206,6 +231,7 @@ $('btnRecusaMinus').onclick = ()=>postJson('/prova-ativa/desfazer-recusa');
 
 requestAnimationFrame(renderFrame);
 loadInscricoes();
+connectEvents();
 poll();
 </script>
 </body>

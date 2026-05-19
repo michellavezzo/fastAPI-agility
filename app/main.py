@@ -1,9 +1,11 @@
+import asyncio
+import json
 from pathlib import Path as FilePath
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi import FastAPI, Depends, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from sqlalchemy import inspect as sa_inspect, text
@@ -57,13 +59,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-chrono = Chronometer()
+_chrono = None
 STATIC_DIR = FilePath(__file__).resolve().parent.parent / "static"
 
 
+def get_chrono():
+    global _chrono
+    if _chrono is None:
+        _chrono = Chronometer()
+    return _chrono
+
+
+@app.on_event("startup")
+def startup_event():
+    get_chrono()
+
+
 @app.get("/hardware/estado")
-def hardware_estado():
-    return chrono.get_hardware_status()
+def hardware_estado(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return get_chrono().get_hardware_status()
+
+
+def _no_store(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+
+
+@app.get("/prova-ativa/events")
+async def prova_ativa_events():
+    async def event_stream():
+        last_version = None
+        last_heartbeat = 0
+        while True:
+            state = get_chrono().get_estado_completo()
+            version = state.get("versao")
+            if version != last_version:
+                last_version = version
+                payload = json.dumps(state, ensure_ascii=False)
+                yield f"event: estado\ndata: {payload}\n\n"
+
+            now = asyncio.get_running_loop().time()
+            if now - last_heartbeat >= 15:
+                last_heartbeat = now
+                yield ": keepalive\n\n"
+            await asyncio.sleep(0.05)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 #  Usuários
 
@@ -333,24 +383,28 @@ def preparar_prova(body: schemas.ProvaAtivaPreparar, db: Session = Depends(get_d
         dados["comprimento_pista"] = insc.prova.comprimento_pista
         dados["tsp"] = insc.prova.tsp
         dados["tmp"] = insc.prova.tmp
+    chrono = get_chrono()
     chrono.prepare(body.id_inscricao, dados)
     return chrono.get_estado_completo()
 
 
 @app.post("/prova-ativa/autorizar", response_model=schemas.ProvaAtivaEstado)
 def autorizar_prova():
+    chrono = get_chrono()
     if not chrono.autorizar():
         raise HTTPException(status_code=409, detail="Estado inválido para autorizar")
     return chrono.get_estado_completo()
 
 
 @app.get("/prova-ativa/estado", response_model=schemas.ProvaAtivaEstado)
-def estado_prova():
-    return chrono.get_estado_completo()
+def estado_prova(response: Response):
+    _no_store(response)
+    return get_chrono().get_estado_completo()
 
 
 @app.post("/prova-ativa/falta", response_model=schemas.FaltasRecusasResponse)
 def add_falta():
+    chrono = get_chrono()
     if not chrono.add_falta():
         raise HTTPException(status_code=409, detail="Estado inválido para adicionar falta")
     e = chrono.get_estado_completo()
@@ -359,6 +413,7 @@ def add_falta():
 
 @app.post("/prova-ativa/desfazer-falta", response_model=schemas.FaltasRecusasResponse)
 def remove_falta():
+    chrono = get_chrono()
     if not chrono.remove_falta():
         raise HTTPException(status_code=409, detail="Não é possível remover falta")
     e = chrono.get_estado_completo()
@@ -367,6 +422,7 @@ def remove_falta():
 
 @app.post("/prova-ativa/recusa", response_model=schemas.FaltasRecusasResponse)
 def add_recusa():
+    chrono = get_chrono()
     if not chrono.add_recusa():
         raise HTTPException(status_code=409, detail="Estado inválido para adicionar recusa")
     e = chrono.get_estado_completo()
@@ -375,6 +431,7 @@ def add_recusa():
 
 @app.post("/prova-ativa/desfazer-recusa", response_model=schemas.FaltasRecusasResponse)
 def remove_recusa():
+    chrono = get_chrono()
     if not chrono.remove_recusa():
         raise HTTPException(status_code=409, detail="Não é possível remover recusa")
     e = chrono.get_estado_completo()
@@ -383,6 +440,7 @@ def remove_recusa():
 
 @app.post("/prova-ativa/forcar-fim", response_model=schemas.ProvaAtivaEstado)
 def forcar_fim():
+    chrono = get_chrono()
     if not chrono.forcar_fim():
         raise HTTPException(status_code=409, detail="Estado inválido para forçar fim")
     return chrono.get_estado_completo()
@@ -390,6 +448,7 @@ def forcar_fim():
 
 @app.post("/prova-ativa/confirmar")
 def confirmar_prova(db: Session = Depends(get_db)):
+    chrono = get_chrono()
     dados = chrono.get_dados_confirmacao()
     if dados is None:
         raise HTTPException(status_code=409, detail="Prova não está finalizada")
@@ -431,12 +490,14 @@ def confirmar_prova(db: Session = Depends(get_db)):
 
 @app.post("/prova-ativa/reset", response_model=schemas.ProvaAtivaEstado)
 def reset_prova():
+    chrono = get_chrono()
     chrono.reset()
     return chrono.get_estado_completo()
 
 
 @app.post("/prova-ativa/simular-sensor", response_model=schemas.ProvaAtivaEstado)
 def simular_sensor():
+    chrono = get_chrono()
     chrono.simular_acionamento()
     return chrono.get_estado_completo()
 
@@ -461,4 +522,5 @@ def operador():
 
 @app.on_event("shutdown")
 def shutdown_event():
-    chrono.cleanup()
+    if _chrono is not None:
+        _chrono.cleanup()

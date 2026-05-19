@@ -309,6 +309,8 @@ class ProvaAtivaPreparar(BaseModel):
 class ProvaAtivaEstado(BaseModel):
     estado: str
     id_inscricao: Optional[int] = None
+    versao: int = 0
+    atualizado_em: Optional[str] = None
     tia_decorrido: float = 0.0
     tia_str: str = "--:--.---"
     top_decorrido: float = 0.0

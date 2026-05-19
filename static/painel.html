@@ -62,6 +62,7 @@ const ESTADO_LABELS = {
 
 let lastSnapshot = null;
 let lastSnapshotTime = 0;
+let eventStreamActive = false;
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
@@ -102,6 +103,14 @@ function applyState(data) {
   }
 }
 
+function setSnapshot(data) {
+  if (!data) return;
+  if (lastSnapshot && data.versao != null && lastSnapshot.versao != null && data.versao < lastSnapshot.versao) return;
+  lastSnapshot = data;
+  lastSnapshotTime = performance.now();
+  applyState(data);
+}
+
 function renderFrame() {
   const vals = interpolate(lastSnapshot, lastSnapshotTime);
   document.getElementById('topTimer').textContent = vals.top;
@@ -111,18 +120,25 @@ function renderFrame() {
 
 async function poll() {
   try {
-    const r = await fetch('/prova-ativa/estado');
+    const r = await fetch('/prova-ativa/estado', {cache: 'no-store'});
     if (r.ok) {
-      const data = await r.json();
-      lastSnapshot = data;
-      lastSnapshotTime = performance.now();
-      applyState(data);
+      setSnapshot(await r.json());
     }
   } catch (_) {}
   setTimeout(poll, POLL_MS);
 }
 
+function connectEvents() {
+  if (!window.EventSource) return;
+  const es = new EventSource('/prova-ativa/events');
+  es.onopen = () => { eventStreamActive = true; };
+  es.onerror = () => { eventStreamActive = false; };
+  es.addEventListener('estado', ev => setSnapshot(JSON.parse(ev.data)));
+  es.onmessage = ev => setSnapshot(JSON.parse(ev.data));
+}
+
 requestAnimationFrame(renderFrame);
+connectEvents();
 poll();
 </script>
 </body>

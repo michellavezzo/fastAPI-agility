@@ -104,6 +104,8 @@ IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.2"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.005"))
+SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
+SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
 def _env_bool(name, default=True):
@@ -132,6 +134,8 @@ class Chronometer:
         ir_emitter_enabled=IR_EMITTER_ENABLED_DEFAULT,
         sensor_poll_interval=SENSOR_POLL_INTERVAL_DEFAULT,
         sensor_rearm_stable_time=SENSOR_REARM_STABLE_DEFAULT,
+        sensor_active_level=SENSOR_ACTIVE_LEVEL_DEFAULT,
+        sensor_ignored_log_interval=SENSOR_IGNORED_LOG_INTERVAL_DEFAULT,
     ):
         self.ir_pin = ir_pin if ir_pin is not None else GPIO_PIN_DEFAULT
         self.ir_led_pin = ir_led_pin if ir_led_pin is not None else IR_LED_PIN_DEFAULT
@@ -140,6 +144,14 @@ class Chronometer:
         self.ir_emitter_enabled = ir_emitter_enabled
         self.sensor_poll_interval = max(0.001, float(sensor_poll_interval))
         self.sensor_rearm_stable_time = max(0.001, float(sensor_rearm_stable_time))
+        self.sensor_active_level = str(sensor_active_level).strip().upper()
+        if self.sensor_active_level not in ("LOW", "HIGH"):
+            logging.warning(
+                "AGILITY_SENSOR_ACTIVE_LEVEL invalido: %s. Usando LOW.",
+                self.sensor_active_level,
+            )
+            self.sensor_active_level = "LOW"
+        self.sensor_ignored_log_interval = max(0.1, float(sensor_ignored_log_interval))
         self._ir_pwm = None
         self._pigpio = None
         self._using_pigpio_pwm = False
@@ -158,6 +170,7 @@ class Chronometer:
         self._sensor_armed = True
         self._sensor_ignored_count = 0
         self._sensor_last_ignored_reason = None
+        self._sensor_last_ignore_log = 0
         self.debounce_time = max(0.001, float(debounce_time))
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
@@ -176,6 +189,8 @@ class Chronometer:
         self._hora_autorizacao = None
         self._hora_inicio_prova = None
         self._hora_fim_prova = None
+        self._state_version = 0
+        self._updated_at = datetime.now().isoformat()
 
         # Contadores
         self._faltas = 0
@@ -212,19 +227,21 @@ class Chronometer:
     def _start_sensor_input(self):
         GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         self._last_sensor_level = GPIO.input(self.ir_pin)
-        self._sensor_armed = self._last_sensor_level == GPIO.HIGH
+        self._sensor_armed = self._last_sensor_level == self._sensor_inactive_level()
         self._sensor_high_since = time.perf_counter() if self._sensor_armed else None
         logging.info(
-            "Sensor IR configurado no GPIO %s com pull-up interno. Nivel inicial: %s. Armado: %s.",
+            "Sensor IR configurado no GPIO %s com pull-up interno. Nivel inicial: %s. "
+            "Ativo em: %s. Armado: %s.",
             self.ir_pin,
             self._last_sensor_level,
+            self.sensor_active_level,
             self._sensor_armed,
         )
 
         try:
             GPIO.add_event_detect(
                 self.ir_pin,
-                GPIO.FALLING,
+                self._sensor_edge(),
                 callback=self._ir_callback,
                 bouncetime=int(self.debounce_time * 1000),
             )
@@ -287,8 +304,8 @@ class Chronometer:
                     self._update_sensor_rearm_locked(current_level, now)
                     should_trigger = (
                         self._sensor_mode == "polling"
-                        and previous_level == GPIO.HIGH
-                        and current_level == GPIO.LOW
+                        and previous_level == self._sensor_inactive_level()
+                        and current_level == self._sensor_active_level()
                     )
 
                 if should_trigger:
@@ -303,7 +320,7 @@ class Chronometer:
             self._sensor_poll_stop.wait(self.sensor_poll_interval)
 
     def _update_sensor_rearm_locked(self, current_level, now):
-        if current_level == GPIO.HIGH:
+        if current_level == self._sensor_inactive_level():
             if self._sensor_high_since is None:
                 self._sensor_high_since = now
 
@@ -314,11 +331,20 @@ class Chronometer:
                 self._sensor_armed = True
                 self._sensor_last_ignored_reason = None
                 logging.info(
-                    "Sensor IR rearmado depois de %.3fs com feixe livre.",
+                    "Sensor IR rearmado depois de %.3fs no nivel inativo.",
                     now - self._sensor_high_since,
                 )
         else:
             self._sensor_high_since = None
+
+    def _sensor_active_level(self):
+        return GPIO.HIGH if self.sensor_active_level == "HIGH" else GPIO.LOW
+
+    def _sensor_inactive_level(self):
+        return GPIO.LOW if self.sensor_active_level == "HIGH" else GPIO.HIGH
+
+    def _sensor_edge(self):
+        return GPIO.RISING if self.sensor_active_level == "HIGH" else GPIO.FALLING
 
     def _start_ir_emitter(self):
         if not GPIO:
@@ -392,6 +418,10 @@ class Chronometer:
                 self._ignore_sensor_trigger_locked("sensor aguardando rearme com feixe livre")
                 return
 
+            if self._estado not in ("autorizado", "rodando"):
+                self._ignore_sensor_trigger_locked(f"estado {self._estado} nao aceita acionamento do sensor")
+                return
+
             self._last_ir_trigger = now
             if channel is not None:
                 self._sensor_armed = False
@@ -401,17 +431,34 @@ class Chronometer:
                 self._t_inicio_prova = now
                 self._hora_inicio_prova = datetime.now().isoformat()
                 self._estado = "rodando"
+                self._mark_state_changed_locked()
                 logging.info(f"Prova iniciada. TIA: {self._get_tia():.3f}s")
             elif self._estado == "rodando":
                 self._t_fim_prova = now
                 self._hora_fim_prova = datetime.now().isoformat()
                 self._estado = "finalizado"
+                self._mark_state_changed_locked()
                 logging.info(f"Prova finalizada. TOP: {self._get_top():.3f}s")
+
+    def _mark_state_changed_locked(self):
+        self._state_version += 1
+        self._updated_at = datetime.now().isoformat()
 
     def _ignore_sensor_trigger_locked(self, reason):
         self._sensor_ignored_count += 1
         self._sensor_last_ignored_reason = reason
-        logging.info("Disparo do sensor ignorado: %s.", reason)
+        now = time.perf_counter()
+        should_log = (
+            now - self._sensor_last_ignore_log >= self.sensor_ignored_log_interval
+            or self._sensor_ignored_count <= 3
+        )
+        if should_log:
+            self._sensor_last_ignore_log = now
+            logging.info(
+                "Disparo do sensor ignorado: %s. Total ignorado: %s.",
+                reason,
+                self._sensor_ignored_count,
+            )
 
     def prepare(self, id_inscricao, dados):
         with self._lock:
@@ -426,6 +473,7 @@ class Chronometer:
             self._hora_fim_prova = None
             self._faltas = 0
             self._recusas = 0
+            self._mark_state_changed_locked()
             logging.info(f"Preparado para inscrição #{id_inscricao}")
 
     def autorizar(self):
@@ -435,6 +483,7 @@ class Chronometer:
             self._t_autorizado = time.perf_counter()
             self._hora_autorizacao = datetime.now().isoformat()
             self._estado = "autorizado"
+            self._mark_state_changed_locked()
             logging.info("Largada autorizada. TIA contando.")
             return True
 
@@ -445,6 +494,7 @@ class Chronometer:
             self._t_fim_prova = time.perf_counter()
             self._hora_fim_prova = datetime.now().isoformat()
             self._estado = "finalizado"
+            self._mark_state_changed_locked()
             logging.info(f"Fim forçado. TOP: {self._get_top():.3f}s")
             return True
 
@@ -452,6 +502,7 @@ class Chronometer:
         with self._lock:
             if self._estado in ("rodando", "finalizado"):
                 self._faltas += 1
+                self._mark_state_changed_locked()
                 return True
             return False
 
@@ -459,6 +510,7 @@ class Chronometer:
         with self._lock:
             if self._estado in ("rodando", "finalizado") and self._faltas > 0:
                 self._faltas -= 1
+                self._mark_state_changed_locked()
                 return True
             return False
 
@@ -466,6 +518,7 @@ class Chronometer:
         with self._lock:
             if self._estado in ("rodando", "finalizado"):
                 self._recusas += 1
+                self._mark_state_changed_locked()
                 return True
             return False
 
@@ -473,6 +526,7 @@ class Chronometer:
         with self._lock:
             if self._estado in ("rodando", "finalizado") and self._recusas > 0:
                 self._recusas -= 1
+                self._mark_state_changed_locked()
                 return True
             return False
 
@@ -490,6 +544,7 @@ class Chronometer:
             self._hora_fim_prova = None
             self._faltas = 0
             self._recusas = 0
+            self._mark_state_changed_locked()
             logging.info("Cronômetro resetado.")
             return old_id
 
@@ -530,6 +585,8 @@ class Chronometer:
             result = {
                 "estado": self._estado,
                 "id_inscricao": self._id_inscricao,
+                "versao": self._state_version,
+                "atualizado_em": self._updated_at,
                 "tia_decorrido": round(tia, 3),
                 "tia_str": self._format_time(tia),
                 "top_decorrido": round(top, 3),
@@ -556,12 +613,14 @@ class Chronometer:
             "sensor_modo": self._sensor_mode,
             "sensor_erro": self._sensor_error,
             "sensor_fallback_motivo": self._sensor_fallback_reason,
+            "sensor_active_level": self.sensor_active_level,
             "sensor_poll_interval": self.sensor_poll_interval,
             "sensor_debounce": self.debounce_time,
             "sensor_rearm_stable": self.sensor_rearm_stable_time,
             "sensor_armado": self._sensor_armed,
             "sensor_disparos_ignorados": self._sensor_ignored_count,
             "sensor_ultimo_ignorado": self._sensor_last_ignored_reason,
+            "sensor_ignored_log_interval": self.sensor_ignored_log_interval,
             "pigpio_disponivel": pigpio is not None,
             "pigpio_import_origem": PIGPIO_IMPORT_SOURCE,
             "pigpio_import_erro": PIGPIO_IMPORT_ERROR,
