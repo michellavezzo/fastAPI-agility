@@ -101,6 +101,8 @@ GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
 IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "38000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
+SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
+SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.2"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.005"))
 
 
@@ -123,12 +125,13 @@ class Chronometer:
     def __init__(
         self,
         ir_pin=None,
-        debounce_time=0.3,
+        debounce_time=SENSOR_DEBOUNCE_DEFAULT,
         ir_led_pin=None,
         ir_frequency=IR_FREQUENCY_DEFAULT,
         ir_duty_cycle=IR_DUTY_CYCLE_DEFAULT,
         ir_emitter_enabled=IR_EMITTER_ENABLED_DEFAULT,
         sensor_poll_interval=SENSOR_POLL_INTERVAL_DEFAULT,
+        sensor_rearm_stable_time=SENSOR_REARM_STABLE_DEFAULT,
     ):
         self.ir_pin = ir_pin if ir_pin is not None else GPIO_PIN_DEFAULT
         self.ir_led_pin = ir_led_pin if ir_led_pin is not None else IR_LED_PIN_DEFAULT
@@ -136,6 +139,7 @@ class Chronometer:
         self.ir_duty_cycle = ir_duty_cycle
         self.ir_emitter_enabled = ir_emitter_enabled
         self.sensor_poll_interval = max(0.001, float(sensor_poll_interval))
+        self.sensor_rearm_stable_time = max(0.001, float(sensor_rearm_stable_time))
         self._ir_pwm = None
         self._pigpio = None
         self._using_pigpio_pwm = False
@@ -146,10 +150,15 @@ class Chronometer:
         self._gpio_error = None
         self._sensor_mode = None
         self._sensor_error = None
+        self._sensor_fallback_reason = None
         self._sensor_poll_stop = threading.Event()
         self._sensor_poll_thread = None
         self._last_sensor_level = None
-        self.debounce_time = debounce_time
+        self._sensor_high_since = None
+        self._sensor_armed = True
+        self._sensor_ignored_count = 0
+        self._sensor_last_ignored_reason = None
+        self.debounce_time = max(0.001, float(debounce_time))
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
 
@@ -203,10 +212,13 @@ class Chronometer:
     def _start_sensor_input(self):
         GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         self._last_sensor_level = GPIO.input(self.ir_pin)
+        self._sensor_armed = self._last_sensor_level == GPIO.HIGH
+        self._sensor_high_since = time.perf_counter() if self._sensor_armed else None
         logging.info(
-            "Sensor IR configurado no GPIO %s com pull-up interno. Nivel inicial: %s.",
+            "Sensor IR configurado no GPIO %s com pull-up interno. Nivel inicial: %s. Armado: %s.",
             self.ir_pin,
             self._last_sensor_level,
+            self._sensor_armed,
         )
 
         try:
@@ -218,37 +230,33 @@ class Chronometer:
             )
             self._sensor_mode = "event_detect"
             self._sensor_error = None
+            self._sensor_fallback_reason = None
             self._gpio_ready = True
             self._gpio_error = None
             logging.info(
                 "Sensor IR usando interrupcao RPi.GPIO.add_event_detect no GPIO %s.",
                 self.ir_pin,
             )
+            self._start_sensor_monitor_thread()
         except Exception as exc:
-            self._sensor_error = f"{type(exc).__name__}: {exc}"
-            logging.exception(
+            self._sensor_fallback_reason = f"{type(exc).__name__}: {exc}"
+            self._sensor_error = None
+            logging.warning(
                 "Falha ao registrar interrupcao no GPIO %s. "
+                "Motivo: %s. "
                 "Possiveis causas: outro processo usando o pino, backend duplicado, "
                 "permissao de GPIO ou limitacao da versao do RPi.GPIO/kernel. "
                 "Ativando fallback por polling.",
                 self.ir_pin,
+                self._sensor_fallback_reason,
             )
             self._start_sensor_polling()
 
     def _start_sensor_polling(self):
-        if self._sensor_poll_thread and self._sensor_poll_thread.is_alive():
-            return
-
-        self._sensor_poll_stop.clear()
         self._sensor_mode = "polling"
         self._gpio_ready = True
         self._gpio_error = None
-        self._sensor_poll_thread = threading.Thread(
-            target=self._sensor_poll_loop,
-            name="agility-gpio17-polling",
-            daemon=True,
-        )
-        self._sensor_poll_thread.start()
+        self._start_sensor_monitor_thread()
         logging.warning(
             "Sensor IR usando polling no GPIO %s a cada %.3fs. "
             "O cronometro continua funcional, mas a precisao depende desse intervalo.",
@@ -256,14 +264,34 @@ class Chronometer:
             self.sensor_poll_interval,
         )
 
+    def _start_sensor_monitor_thread(self):
+        if self._sensor_poll_thread and self._sensor_poll_thread.is_alive():
+            return
+
+        self._sensor_poll_stop.clear()
+        self._sensor_poll_thread = threading.Thread(
+            target=self._sensor_poll_loop,
+            name="agility-gpio17-sensor",
+            daemon=True,
+        )
+        self._sensor_poll_thread.start()
+
     def _sensor_poll_loop(self):
         while not self._sensor_poll_stop.is_set():
             try:
                 current_level = GPIO.input(self.ir_pin)
-                previous_level = self._last_sensor_level
-                self._last_sensor_level = current_level
+                now = time.perf_counter()
+                with self._lock:
+                    previous_level = self._last_sensor_level
+                    self._last_sensor_level = current_level
+                    self._update_sensor_rearm_locked(current_level, now)
+                    should_trigger = (
+                        self._sensor_mode == "polling"
+                        and previous_level == GPIO.HIGH
+                        and current_level == GPIO.LOW
+                    )
 
-                if previous_level == GPIO.HIGH and current_level == GPIO.LOW:
+                if should_trigger:
                     self._ir_callback(self.ir_pin)
             except Exception as exc:
                 self._gpio_ready = False
@@ -273,6 +301,24 @@ class Chronometer:
                 return
 
             self._sensor_poll_stop.wait(self.sensor_poll_interval)
+
+    def _update_sensor_rearm_locked(self, current_level, now):
+        if current_level == GPIO.HIGH:
+            if self._sensor_high_since is None:
+                self._sensor_high_since = now
+
+            if (
+                not self._sensor_armed
+                and now - self._sensor_high_since >= self.sensor_rearm_stable_time
+            ):
+                self._sensor_armed = True
+                self._sensor_last_ignored_reason = None
+                logging.info(
+                    "Sensor IR rearmado depois de %.3fs com feixe livre.",
+                    now - self._sensor_high_since,
+                )
+        else:
+            self._sensor_high_since = None
 
     def _start_ir_emitter(self):
         if not GPIO:
@@ -337,8 +383,19 @@ class Chronometer:
         now = time.perf_counter()
         with self._lock:
             if now - self._last_ir_trigger < self.debounce_time:
+                self._ignore_sensor_trigger_locked(
+                    f"debounce ativo ({now - self._last_ir_trigger:.3f}s < {self.debounce_time:.3f}s)"
+                )
                 return
+
+            if channel is not None and not self._sensor_armed:
+                self._ignore_sensor_trigger_locked("sensor aguardando rearme com feixe livre")
+                return
+
             self._last_ir_trigger = now
+            if channel is not None:
+                self._sensor_armed = False
+                self._sensor_high_since = None
 
             if self._estado == "autorizado":
                 self._t_inicio_prova = now
@@ -350,6 +407,11 @@ class Chronometer:
                 self._hora_fim_prova = datetime.now().isoformat()
                 self._estado = "finalizado"
                 logging.info(f"Prova finalizada. TOP: {self._get_top():.3f}s")
+
+    def _ignore_sensor_trigger_locked(self, reason):
+        self._sensor_ignored_count += 1
+        self._sensor_last_ignored_reason = reason
+        logging.info("Disparo do sensor ignorado: %s.", reason)
 
     def prepare(self, id_inscricao, dados):
         with self._lock:
@@ -493,7 +555,13 @@ class Chronometer:
             "sensor_gpio_bcm": self.ir_pin,
             "sensor_modo": self._sensor_mode,
             "sensor_erro": self._sensor_error,
+            "sensor_fallback_motivo": self._sensor_fallback_reason,
             "sensor_poll_interval": self.sensor_poll_interval,
+            "sensor_debounce": self.debounce_time,
+            "sensor_rearm_stable": self.sensor_rearm_stable_time,
+            "sensor_armado": self._sensor_armed,
+            "sensor_disparos_ignorados": self._sensor_ignored_count,
+            "sensor_ultimo_ignorado": self._sensor_last_ignored_reason,
             "pigpio_disponivel": pigpio is not None,
             "pigpio_import_origem": PIGPIO_IMPORT_SOURCE,
             "pigpio_import_erro": PIGPIO_IMPORT_ERROR,
