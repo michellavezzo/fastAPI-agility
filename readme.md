@@ -29,6 +29,12 @@ pip install -r requirements.txt
 
 uvicorn app.main:app --reload
 
+- Suba a API:
+
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
 # Rodar Comandos SQL terminal
 
 sqlite3 agility.db
@@ -38,6 +44,13 @@ sqlite3 agility.db
 python create_tables.py
 
 # Install Raspberry PI scripts
+
+Na Raspberry Pi, instale primeiro o pacote de GPIO do sistema:
+
+```bash
+sudo apt update
+sudo apt install python3-rpi.gpio
+```
 
 - Dê permissão de execução com
 
