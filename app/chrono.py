@@ -108,10 +108,10 @@ SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE"
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
 SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
 SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "auto").strip().lower()
-SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.002"))
-SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.03"))
+SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0"))
+SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.02"))
 SENSOR_READY_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_CONFIRM", "0.05"))
-SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.2"))
+SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.8"))
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
@@ -128,7 +128,7 @@ def _env_bool(name, default=True):
 
 
 IR_EMITTER_ENABLED_DEFAULT = _env_bool("AGILITY_IR_EMITTER_ENABLED", True)
-IR_BURST_ENABLED_DEFAULT = _env_bool("AGILITY_IR_BURST_ENABLED", True)
+IR_BURST_ENABLED_DEFAULT = _env_bool("AGILITY_IR_BURST_ENABLED", False)
 SENSOR_REQUIRE_REARM_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_REARM", False)
 SENSOR_REQUIRE_READY_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_READY", True)
 
@@ -381,9 +381,10 @@ class Chronometer:
                         current_level,
                         now,
                     )
+                    trigger_time = self._beam_last_break_at if should_trigger else None
 
                 if should_trigger:
-                    self._ir_callback(self.ir_pin)
+                    self._ir_callback(self.ir_pin, event_time=trigger_time)
             except Exception as exc:
                 self._gpio_ready = False
                 self._gpio_error = f"{type(exc).__name__}: {exc}"
@@ -441,6 +442,18 @@ class Chronometer:
 
     def _update_beam_state_locked(self, previous_level, current_level, now):
         was_aligned = self._beam_aligned
+
+        if not self.ir_burst_enabled:
+            self._beam_aligned = current_level == self._sensor_inactive_level()
+            if self._beam_aligned:
+                self._beam_last_signal_at = now
+
+            if was_aligned and not self._beam_aligned:
+                self._beam_last_break_at = now
+                self._beam_break_count += 1
+                return True
+
+            return False
 
         if current_level == self._sensor_inactive_level():
             self._beam_last_signal_at = now
@@ -656,8 +669,8 @@ class Chronometer:
 
         self._set_ir_carrier_active(False, duty_cycle)
 
-    def _ir_callback(self, channel):
-        now = time.perf_counter()
+    def _ir_callback(self, channel, event_time=None):
+        now = event_time if event_time is not None else time.perf_counter()
         confirmed_level = None
         if channel is not None and self.sensor_trigger_confirm_time > 0 and GPIO is not None:
             time.sleep(self.sensor_trigger_confirm_time)
