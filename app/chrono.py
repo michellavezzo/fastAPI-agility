@@ -101,14 +101,17 @@ GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
 IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "31000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
+IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
+IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.002"))
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
 SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
 SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "auto").strip().lower()
 SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.002"))
+SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.03"))
 SENSOR_READY_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_CONFIRM", "0.05"))
-SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.8"))
+SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.2"))
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
@@ -125,6 +128,7 @@ def _env_bool(name, default=True):
 
 
 IR_EMITTER_ENABLED_DEFAULT = _env_bool("AGILITY_IR_EMITTER_ENABLED", True)
+IR_BURST_ENABLED_DEFAULT = _env_bool("AGILITY_IR_BURST_ENABLED", True)
 SENSOR_REQUIRE_REARM_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_REARM", False)
 SENSOR_REQUIRE_READY_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_READY", True)
 
@@ -143,6 +147,9 @@ class Chronometer:
         ir_frequency=IR_FREQUENCY_DEFAULT,
         ir_duty_cycle=IR_DUTY_CYCLE_DEFAULT,
         ir_emitter_enabled=IR_EMITTER_ENABLED_DEFAULT,
+        ir_burst_enabled=IR_BURST_ENABLED_DEFAULT,
+        ir_burst_on_time=IR_BURST_ON_DEFAULT,
+        ir_burst_off_time=IR_BURST_OFF_DEFAULT,
         sensor_poll_interval=SENSOR_POLL_INTERVAL_DEFAULT,
         sensor_rearm_stable_time=SENSOR_REARM_STABLE_DEFAULT,
         sensor_active_level=SENSOR_ACTIVE_LEVEL_DEFAULT,
@@ -150,6 +157,7 @@ class Chronometer:
         sensor_read_mode=SENSOR_READ_MODE_DEFAULT,
         sensor_require_ready=SENSOR_REQUIRE_READY_DEFAULT,
         sensor_trigger_confirm_time=SENSOR_TRIGGER_CONFIRM_DEFAULT,
+        sensor_signal_timeout=SENSOR_SIGNAL_TIMEOUT_DEFAULT,
         sensor_ready_confirm_time=SENSOR_READY_CONFIRM_DEFAULT,
         sensor_ready_min_ratio=SENSOR_READY_MIN_RATIO_DEFAULT,
         sensor_ignored_log_interval=SENSOR_IGNORED_LOG_INTERVAL_DEFAULT,
@@ -159,9 +167,13 @@ class Chronometer:
         self.ir_frequency = ir_frequency
         self.ir_duty_cycle = ir_duty_cycle
         self.ir_emitter_enabled = ir_emitter_enabled
+        self.ir_burst_enabled = _bool_value(ir_burst_enabled, True)
+        self.ir_burst_on_time = max(0.0005, float(ir_burst_on_time))
+        self.ir_burst_off_time = max(0.0005, float(ir_burst_off_time))
         self.sensor_poll_interval = max(0.001, float(sensor_poll_interval))
         self.sensor_rearm_stable_time = max(0.001, float(sensor_rearm_stable_time))
         self.sensor_trigger_confirm_time = max(0.0, float(sensor_trigger_confirm_time))
+        self.sensor_signal_timeout = max(self.sensor_poll_interval, float(sensor_signal_timeout))
         self.sensor_ready_confirm_time = max(0.0, float(sensor_ready_confirm_time))
         self.sensor_ready_min_ratio = max(0.0, min(1.0, float(sensor_ready_min_ratio)))
         self.sensor_require_rearm = _bool_value(sensor_require_rearm, False)
@@ -182,6 +194,8 @@ class Chronometer:
             self.sensor_active_level = "LOW"
         self.sensor_ignored_log_interval = max(0.1, float(sensor_ignored_log_interval))
         self._ir_pwm = None
+        self._ir_burst_thread = None
+        self._ir_burst_stop = threading.Event()
         self._pigpio = None
         self._using_pigpio_pwm = False
         self._gpio_ready = False
@@ -206,6 +220,10 @@ class Chronometer:
         self._sensor_transition_count = 0
         self._sensor_last_transition = None
         self._sensor_last_ready_check = None
+        self._beam_aligned = False
+        self._beam_last_signal_at = None
+        self._beam_last_break_at = None
+        self._beam_break_count = 0
         self._last_authorize_error = None
         self.debounce_time = max(0.001, float(debounce_time))
         self._lock = threading.RLock()
@@ -265,10 +283,14 @@ class Chronometer:
         self._last_sensor_level = GPIO.input(self.ir_pin)
         self._sensor_armed = self._last_sensor_level == self._sensor_inactive_level()
         self._sensor_high_since = time.perf_counter() if self._sensor_armed else None
+        now = time.perf_counter()
+        if self._last_sensor_level == self._sensor_inactive_level():
+            self._beam_last_signal_at = now
+            self._beam_aligned = True
         logging.info(
             "Sensor IR configurado no GPIO %s com pull-up interno. Nivel inicial: %s. "
             "Estado do feixe: %s. Nivel ativo/quebrado: %s. Armado: %s. "
-            "Rearme obrigatorio: %s. Leitura: %s.",
+            "Rearme obrigatorio: %s. Leitura: %s. Timeout sinal: %.3fs.",
             self.ir_pin,
             self._last_sensor_level,
             self._sensor_level_status(self._last_sensor_level),
@@ -276,7 +298,15 @@ class Chronometer:
             self._sensor_armed,
             self.sensor_require_rearm,
             self.sensor_read_mode,
+            self.sensor_signal_timeout,
         )
+
+        if self.ir_burst_enabled and self.sensor_read_mode != "polling":
+            logging.info(
+                "Rajadas IR habilitadas. Usando polling logico para detectar ausencia de pulsos."
+            )
+            self._start_sensor_polling(configured=True)
+            return
 
         if self.sensor_read_mode == "polling":
             self._start_sensor_polling(configured=True)
@@ -345,14 +375,11 @@ class Chronometer:
                 now = time.perf_counter()
                 with self._lock:
                     previous_level = self._last_sensor_level
-                    self._last_sensor_level = current_level
-                    if previous_level is not None and current_level != previous_level:
-                        self._record_sensor_transition_locked(previous_level, current_level)
-                    self._update_sensor_rearm_locked(current_level, now)
-                    should_trigger = (
-                        self._sensor_mode == "polling"
-                        and previous_level == self._sensor_inactive_level()
-                        and current_level == self._sensor_active_level()
+                    self._refresh_sensor_level_locked(current_level, now)
+                    should_trigger = self._sensor_mode == "polling" and self._update_beam_state_locked(
+                        previous_level,
+                        current_level,
+                        now,
                     )
 
                 if should_trigger:
@@ -409,6 +436,27 @@ class Chronometer:
             return "feixe_alinhado"
         return f"nivel_{level}"
 
+    def _logical_beam_status_locked(self):
+        return "feixe_alinhado" if self._beam_aligned else "feixe_quebrado"
+
+    def _update_beam_state_locked(self, previous_level, current_level, now):
+        was_aligned = self._beam_aligned
+
+        if current_level == self._sensor_inactive_level():
+            self._beam_last_signal_at = now
+            self._beam_aligned = True
+        elif self._beam_last_signal_at is None:
+            self._beam_aligned = False
+        elif now - self._beam_last_signal_at >= self.sensor_signal_timeout:
+            self._beam_aligned = False
+
+        if was_aligned and not self._beam_aligned:
+            self._beam_last_break_at = now
+            self._beam_break_count += 1
+            return True
+
+        return False
+
     def _sensor_ready_to_start_locked(self, now=None):
         if not self._gpio_ready or self._last_sensor_level is None:
             self._sensor_last_ready_check = None
@@ -450,6 +498,7 @@ class Chronometer:
 
         samples = 0
         expected_samples = 0
+        signal_samples = 0
         high_samples = 0
         low_samples = 0
         transitions = 0
@@ -472,6 +521,7 @@ class Chronometer:
             samples += 1
             if current_level == expected_level:
                 expected_samples += 1
+                signal_samples += 1
             if current_level == self._gpio_high():
                 high_samples += 1
             else:
@@ -486,6 +536,7 @@ class Chronometer:
             "expected_level": expected_level,
             "expected_ratio": round(expected_ratio, 3),
             "samples": samples,
+            "signal_samples": signal_samples,
             "high": high_samples,
             "low": low_samples,
             "transitions": transitions,
@@ -520,17 +571,23 @@ class Chronometer:
                 if self._pigpio.connected:
                     self._pigpio.hardware_PWM(
                         self.ir_led_pin,
-                        self.ir_frequency,
-                        int(duty_cycle * 10000),
+                        self.ir_frequency if not self.ir_burst_enabled else 0,
+                        int(duty_cycle * 10000) if not self.ir_burst_enabled else 0,
                     )
                     self._using_pigpio_pwm = True
                     self._ir_emitter_active = True
-                    self._ir_emitter_mode = "pigpio.hardware_PWM"
+                    self._ir_emitter_mode = (
+                        "pigpio.hardware_PWM.burst"
+                        if self.ir_burst_enabled
+                        else "pigpio.hardware_PWM"
+                    )
                     self._ir_emitter_error = None
                     logging.info(
                         f"LED IR em GPIO {self.ir_led_pin} com PWM hardware "
                         f"{self.ir_frequency}Hz e duty {duty_cycle}%."
                     )
+                    if self.ir_burst_enabled:
+                        self._start_ir_burst_thread(duty_cycle)
                     return
 
                 self._pigpio = None
@@ -542,18 +599,62 @@ class Chronometer:
         try:
             GPIO.setup(self.ir_led_pin, GPIO.OUT, initial=GPIO.LOW)
             self._ir_pwm = GPIO.PWM(self.ir_led_pin, self.ir_frequency)
-            self._ir_pwm.start(duty_cycle)
+            self._ir_pwm.start(0 if self.ir_burst_enabled else duty_cycle)
             self._ir_emitter_active = True
-            self._ir_emitter_mode = "RPi.GPIO.PWM"
+            self._ir_emitter_mode = (
+                "RPi.GPIO.PWM.burst" if self.ir_burst_enabled else "RPi.GPIO.PWM"
+            )
             self._ir_emitter_error = None
             logging.info(
                 f"LED IR em GPIO {self.ir_led_pin} com PWM {self.ir_frequency}Hz "
                 f"e duty {duty_cycle}%."
             )
+            if self.ir_burst_enabled:
+                self._start_ir_burst_thread(duty_cycle)
         except Exception as exc:
             self._ir_emitter_active = False
             self._ir_emitter_error = f"{type(exc).__name__}: {exc}"
             logging.exception("Falha ao inicializar emissor IR.")
+
+    def _set_ir_carrier_active(self, active, duty_cycle):
+        if self._using_pigpio_pwm and self._pigpio is not None:
+            self._pigpio.hardware_PWM(
+                self.ir_led_pin,
+                self.ir_frequency if active else 0,
+                int(duty_cycle * 10000) if active else 0,
+            )
+            return
+
+        if self._ir_pwm is not None:
+            self._ir_pwm.ChangeDutyCycle(duty_cycle if active else 0)
+
+    def _start_ir_burst_thread(self, duty_cycle):
+        if self._ir_burst_thread and self._ir_burst_thread.is_alive():
+            return
+
+        self._ir_burst_stop.clear()
+        self._ir_burst_thread = threading.Thread(
+            target=self._ir_burst_loop,
+            args=(duty_cycle,),
+            name="agility-ir-burst",
+            daemon=True,
+        )
+        self._ir_burst_thread.start()
+        logging.info(
+            "Emissor IR em rajadas: %.3fs ligado / %.3fs desligado.",
+            self.ir_burst_on_time,
+            self.ir_burst_off_time,
+        )
+
+    def _ir_burst_loop(self, duty_cycle):
+        while not self._ir_burst_stop.is_set():
+            self._set_ir_carrier_active(True, duty_cycle)
+            if self._ir_burst_stop.wait(self.ir_burst_on_time):
+                break
+            self._set_ir_carrier_active(False, duty_cycle)
+            self._ir_burst_stop.wait(self.ir_burst_off_time)
+
+        self._set_ir_carrier_active(False, duty_cycle)
 
     def _ir_callback(self, channel):
         now = time.perf_counter()
@@ -832,14 +933,19 @@ class Chronometer:
             "sensor_active_level": self.sensor_active_level,
             "sensor_nivel_atual": self._last_sensor_level,
             "sensor_estado_sinal": self._sensor_level_status(self._last_sensor_level),
-            "sensor_feixe_alinhado": self._last_sensor_level == self._sensor_inactive_level(),
-            "sensor_feixe_quebrado": self._last_sensor_level == self._sensor_active_level(),
+            "sensor_estado_feixe": self._logical_beam_status_locked(),
+            "sensor_feixe_logico_alinhado": self._beam_aligned,
+            "sensor_feixe_alinhado": self._beam_aligned,
+            "sensor_feixe_quebrado": not self._beam_aligned,
+            "sensor_raw_feixe_alinhado": self._last_sensor_level == self._sensor_inactive_level(),
+            "sensor_raw_feixe_quebrado": self._last_sensor_level == self._sensor_active_level(),
             "sensor_nivel_ativo": self._sensor_active_level(),
             "sensor_nivel_inativo": self._sensor_inactive_level(),
             "sensor_poll_interval": self.sensor_poll_interval,
             "sensor_debounce": self.debounce_time,
             "sensor_rearm_stable": self.sensor_rearm_stable_time,
             "sensor_trigger_confirm": self.sensor_trigger_confirm_time,
+            "sensor_signal_timeout": self.sensor_signal_timeout,
             "sensor_ready_confirm": self.sensor_ready_confirm_time,
             "sensor_ready_min_ratio": self.sensor_ready_min_ratio,
             "sensor_ultima_amostra_pronto": self._sensor_last_ready_check,
@@ -853,6 +959,12 @@ class Chronometer:
             "sensor_ultimo_aceito": self._sensor_last_accepted_event,
             "sensor_transicoes": self._sensor_transition_count,
             "sensor_ultima_transicao": self._sensor_last_transition,
+            "sensor_ultimo_sinal_atras_s": (
+                round(time.perf_counter() - self._beam_last_signal_at, 3)
+                if self._beam_last_signal_at is not None
+                else None
+            ),
+            "sensor_quebras_logicas": self._beam_break_count,
             "sensor_ignored_log_interval": self.sensor_ignored_log_interval,
             "pigpio_disponivel": pigpio is not None,
             "pigpio_import_origem": PIGPIO_IMPORT_SOURCE,
@@ -862,6 +974,9 @@ class Chronometer:
             "emissor_ativo": self._ir_emitter_active,
             "emissor_modo": self._ir_emitter_mode,
             "emissor_erro": self._ir_emitter_error,
+            "emissor_rajada_habilitada": self.ir_burst_enabled,
+            "emissor_rajada_on": self.ir_burst_on_time,
+            "emissor_rajada_off": self.ir_burst_off_time,
             "frequencia_hz": self.ir_frequency,
             "duty_cycle": self.ir_duty_cycle,
         }
@@ -885,6 +1000,10 @@ class Chronometer:
         if self._sensor_poll_thread and self._sensor_poll_thread.is_alive():
             self._sensor_poll_stop.set()
             self._sensor_poll_thread.join(timeout=1)
+
+        if self._ir_burst_thread and self._ir_burst_thread.is_alive():
+            self._ir_burst_stop.set()
+            self._ir_burst_thread.join(timeout=1)
 
         if self._using_pigpio_pwm and self._pigpio is not None:
             self._pigpio.hardware_PWM(self.ir_led_pin, 0, 0)
