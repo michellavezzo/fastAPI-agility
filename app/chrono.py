@@ -108,14 +108,20 @@ SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
-def _env_bool(name, default=True):
-    value = os.environ.get(name)
+def _bool_value(value, default=True):
     if value is None:
         return default
-    return value.strip().lower() not in ("0", "false", "no", "off")
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+
+def _env_bool(name, default=True):
+    return _bool_value(os.environ.get(name), default)
 
 
 IR_EMITTER_ENABLED_DEFAULT = _env_bool("AGILITY_IR_EMITTER_ENABLED", True)
+SENSOR_REQUIRE_REARM_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_REARM", False)
 
 
 class Chronometer:
@@ -135,6 +141,7 @@ class Chronometer:
         sensor_poll_interval=SENSOR_POLL_INTERVAL_DEFAULT,
         sensor_rearm_stable_time=SENSOR_REARM_STABLE_DEFAULT,
         sensor_active_level=SENSOR_ACTIVE_LEVEL_DEFAULT,
+        sensor_require_rearm=SENSOR_REQUIRE_REARM_DEFAULT,
         sensor_ignored_log_interval=SENSOR_IGNORED_LOG_INTERVAL_DEFAULT,
     ):
         self.ir_pin = ir_pin if ir_pin is not None else GPIO_PIN_DEFAULT
@@ -144,6 +151,7 @@ class Chronometer:
         self.ir_emitter_enabled = ir_emitter_enabled
         self.sensor_poll_interval = max(0.001, float(sensor_poll_interval))
         self.sensor_rearm_stable_time = max(0.001, float(sensor_rearm_stable_time))
+        self.sensor_require_rearm = _bool_value(sensor_require_rearm, False)
         self.sensor_active_level = str(sensor_active_level).strip().upper()
         if self.sensor_active_level not in ("LOW", "HIGH"):
             logging.warning(
@@ -171,6 +179,11 @@ class Chronometer:
         self._sensor_ignored_count = 0
         self._sensor_last_ignored_reason = None
         self._sensor_last_ignore_log = 0
+        self._sensor_accepted_count = 0
+        self._sensor_last_event = None
+        self._sensor_last_accepted_event = None
+        self._sensor_transition_count = 0
+        self._sensor_last_transition = None
         self.debounce_time = max(0.001, float(debounce_time))
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
@@ -231,11 +244,12 @@ class Chronometer:
         self._sensor_high_since = time.perf_counter() if self._sensor_armed else None
         logging.info(
             "Sensor IR configurado no GPIO %s com pull-up interno. Nivel inicial: %s. "
-            "Ativo em: %s. Armado: %s.",
+            "Ativo em: %s. Armado: %s. Rearme obrigatorio: %s.",
             self.ir_pin,
             self._last_sensor_level,
             self.sensor_active_level,
             self._sensor_armed,
+            self.sensor_require_rearm,
         )
 
         try:
@@ -301,6 +315,8 @@ class Chronometer:
                 with self._lock:
                     previous_level = self._last_sensor_level
                     self._last_sensor_level = current_level
+                    if previous_level is not None and current_level != previous_level:
+                        self._record_sensor_transition_locked(previous_level, current_level)
                     self._update_sensor_rearm_locked(current_level, now)
                     should_trigger = (
                         self._sensor_mode == "polling"
@@ -324,18 +340,22 @@ class Chronometer:
             if self._sensor_high_since is None:
                 self._sensor_high_since = now
 
-            if (
-                not self._sensor_armed
-                and now - self._sensor_high_since >= self.sensor_rearm_stable_time
+            stable_for = now - self._sensor_high_since
+            if not self._sensor_armed and (
+                not self.sensor_require_rearm
+                or stable_for >= self.sensor_rearm_stable_time
             ):
                 self._sensor_armed = True
                 self._sensor_last_ignored_reason = None
-                logging.info(
-                    "Sensor IR rearmado depois de %.3fs no nivel inativo.",
-                    now - self._sensor_high_since,
-                )
+                if self.sensor_require_rearm:
+                    logging.info(
+                        "Sensor IR rearmado depois de %.3fs no nivel inativo.",
+                        stable_for,
+                    )
         else:
             self._sensor_high_since = None
+            if not self.sensor_require_rearm:
+                self._sensor_armed = False
 
     def _sensor_active_level(self):
         return GPIO.HIGH if self.sensor_active_level == "HIGH" else GPIO.LOW
@@ -345,6 +365,16 @@ class Chronometer:
 
     def _sensor_edge(self):
         return GPIO.RISING if self.sensor_active_level == "HIGH" else GPIO.FALLING
+
+    def _record_sensor_transition_locked(self, previous_level, current_level):
+        self._sensor_transition_count += 1
+        self._sensor_last_transition = {
+            "de": previous_level,
+            "para": current_level,
+            "ativo": current_level == self._sensor_active_level(),
+            "hora": datetime.now().isoformat(),
+            "modo": self._sensor_mode,
+        }
 
     def _start_ir_emitter(self):
         if not GPIO:
@@ -410,20 +440,27 @@ class Chronometer:
         with self._lock:
             if now - self._last_ir_trigger < self.debounce_time:
                 self._ignore_sensor_trigger_locked(
-                    f"debounce ativo ({now - self._last_ir_trigger:.3f}s < {self.debounce_time:.3f}s)"
+                    f"debounce ativo ({now - self._last_ir_trigger:.3f}s < {self.debounce_time:.3f}s)",
+                    channel,
                 )
                 return
 
-            if channel is not None and not self._sensor_armed:
-                self._ignore_sensor_trigger_locked("sensor aguardando rearme com feixe livre")
+            if channel is not None and self.sensor_require_rearm and not self._sensor_armed:
+                self._ignore_sensor_trigger_locked(
+                    "sensor aguardando rearme com feixe livre",
+                    channel,
+                )
                 return
 
             if self._estado not in ("autorizado", "rodando"):
-                self._ignore_sensor_trigger_locked(f"estado {self._estado} nao aceita acionamento do sensor")
+                self._ignore_sensor_trigger_locked(
+                    f"estado {self._estado} nao aceita acionamento do sensor",
+                    channel,
+                )
                 return
 
             self._last_ir_trigger = now
-            if channel is not None:
+            if channel is not None and self.sensor_require_rearm:
                 self._sensor_armed = False
                 self._sensor_high_since = None
 
@@ -432,21 +469,40 @@ class Chronometer:
                 self._hora_inicio_prova = datetime.now().isoformat()
                 self._estado = "rodando"
                 self._mark_state_changed_locked()
+                self._record_sensor_event_locked("aceito_inicio", channel)
                 logging.info(f"Prova iniciada. TIA: {self._get_tia():.3f}s")
             elif self._estado == "rodando":
                 self._t_fim_prova = now
                 self._hora_fim_prova = datetime.now().isoformat()
                 self._estado = "finalizado"
                 self._mark_state_changed_locked()
+                self._record_sensor_event_locked("aceito_fim", channel)
                 logging.info(f"Prova finalizada. TOP: {self._get_top():.3f}s")
+
+    def _record_sensor_event_locked(self, event_type, channel, reason=None):
+        event = {
+            "tipo": event_type,
+            "estado": self._estado,
+            "canal": channel,
+            "motivo": reason,
+            "nivel": self._last_sensor_level,
+            "armado": self._sensor_armed,
+            "hora": datetime.now().isoformat(),
+            "versao": self._state_version,
+        }
+        self._sensor_last_event = event
+        if event_type.startswith("aceito"):
+            self._sensor_accepted_count += 1
+            self._sensor_last_accepted_event = event
 
     def _mark_state_changed_locked(self):
         self._state_version += 1
         self._updated_at = datetime.now().isoformat()
 
-    def _ignore_sensor_trigger_locked(self, reason):
+    def _ignore_sensor_trigger_locked(self, reason, channel=None):
         self._sensor_ignored_count += 1
         self._sensor_last_ignored_reason = reason
+        self._record_sensor_event_locked("ignorado", channel, reason)
         now = time.perf_counter()
         should_log = (
             now - self._sensor_last_ignore_log >= self.sensor_ignored_log_interval
@@ -614,12 +670,21 @@ class Chronometer:
             "sensor_erro": self._sensor_error,
             "sensor_fallback_motivo": self._sensor_fallback_reason,
             "sensor_active_level": self.sensor_active_level,
+            "sensor_nivel_atual": self._last_sensor_level,
+            "sensor_nivel_ativo": self._sensor_active_level() if GPIO is not None else None,
+            "sensor_nivel_inativo": self._sensor_inactive_level() if GPIO is not None else None,
             "sensor_poll_interval": self.sensor_poll_interval,
             "sensor_debounce": self.debounce_time,
             "sensor_rearm_stable": self.sensor_rearm_stable_time,
+            "sensor_require_rearm": self.sensor_require_rearm,
             "sensor_armado": self._sensor_armed,
+            "sensor_disparos_aceitos": self._sensor_accepted_count,
             "sensor_disparos_ignorados": self._sensor_ignored_count,
             "sensor_ultimo_ignorado": self._sensor_last_ignored_reason,
+            "sensor_ultimo_evento": self._sensor_last_event,
+            "sensor_ultimo_aceito": self._sensor_last_accepted_event,
+            "sensor_transicoes": self._sensor_transition_count,
+            "sensor_ultima_transicao": self._sensor_last_transition,
             "sensor_ignored_log_interval": self.sensor_ignored_log_interval,
             "pigpio_disponivel": pigpio is not None,
             "pigpio_import_origem": PIGPIO_IMPORT_SOURCE,
