@@ -101,6 +101,7 @@ GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
 IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "38000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
+SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.005"))
 
 
 def _env_bool(name, default=True):
@@ -127,12 +128,14 @@ class Chronometer:
         ir_frequency=IR_FREQUENCY_DEFAULT,
         ir_duty_cycle=IR_DUTY_CYCLE_DEFAULT,
         ir_emitter_enabled=IR_EMITTER_ENABLED_DEFAULT,
+        sensor_poll_interval=SENSOR_POLL_INTERVAL_DEFAULT,
     ):
         self.ir_pin = ir_pin if ir_pin is not None else GPIO_PIN_DEFAULT
         self.ir_led_pin = ir_led_pin if ir_led_pin is not None else IR_LED_PIN_DEFAULT
         self.ir_frequency = ir_frequency
         self.ir_duty_cycle = ir_duty_cycle
         self.ir_emitter_enabled = ir_emitter_enabled
+        self.sensor_poll_interval = max(0.001, float(sensor_poll_interval))
         self._ir_pwm = None
         self._pigpio = None
         self._using_pigpio_pwm = False
@@ -141,6 +144,11 @@ class Chronometer:
         self._ir_emitter_mode = None
         self._ir_emitter_error = None
         self._gpio_error = None
+        self._sensor_mode = None
+        self._sensor_error = None
+        self._sensor_poll_stop = threading.Event()
+        self._sensor_poll_thread = None
+        self._last_sensor_level = None
         self.debounce_time = debounce_time
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
@@ -186,19 +194,85 @@ class Chronometer:
                     self.ir_emitter_enabled = False
 
                 self._start_ir_emitter()
-
-                GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
-                GPIO.add_event_detect(
-                    self.ir_pin, GPIO.FALLING,
-                    callback=self._ir_callback,
-                    bouncetime=int(self.debounce_time * 1000)
-                )
-                self._gpio_ready = True
-                logging.info(f"GPIO {self.ir_pin} configurado com pull-up interno.")
+                self._start_sensor_input()
             except Exception as exc:
                 self._gpio_ready = False
                 self._gpio_error = f"{type(exc).__name__}: {exc}"
                 logging.exception("Falha ao inicializar GPIO do cronometro.")
+
+    def _start_sensor_input(self):
+        GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        self._last_sensor_level = GPIO.input(self.ir_pin)
+        logging.info(
+            "Sensor IR configurado no GPIO %s com pull-up interno. Nivel inicial: %s.",
+            self.ir_pin,
+            self._last_sensor_level,
+        )
+
+        try:
+            GPIO.add_event_detect(
+                self.ir_pin,
+                GPIO.FALLING,
+                callback=self._ir_callback,
+                bouncetime=int(self.debounce_time * 1000),
+            )
+            self._sensor_mode = "event_detect"
+            self._sensor_error = None
+            self._gpio_ready = True
+            self._gpio_error = None
+            logging.info(
+                "Sensor IR usando interrupcao RPi.GPIO.add_event_detect no GPIO %s.",
+                self.ir_pin,
+            )
+        except Exception as exc:
+            self._sensor_error = f"{type(exc).__name__}: {exc}"
+            logging.exception(
+                "Falha ao registrar interrupcao no GPIO %s. "
+                "Possiveis causas: outro processo usando o pino, backend duplicado, "
+                "permissao de GPIO ou limitacao da versao do RPi.GPIO/kernel. "
+                "Ativando fallback por polling.",
+                self.ir_pin,
+            )
+            self._start_sensor_polling()
+
+    def _start_sensor_polling(self):
+        if self._sensor_poll_thread and self._sensor_poll_thread.is_alive():
+            return
+
+        self._sensor_poll_stop.clear()
+        self._sensor_mode = "polling"
+        self._gpio_ready = True
+        self._gpio_error = None
+        self._sensor_poll_thread = threading.Thread(
+            target=self._sensor_poll_loop,
+            name="agility-gpio17-polling",
+            daemon=True,
+        )
+        self._sensor_poll_thread.start()
+        logging.warning(
+            "Sensor IR usando polling no GPIO %s a cada %.3fs. "
+            "O cronometro continua funcional, mas a precisao depende desse intervalo.",
+            self.ir_pin,
+            self.sensor_poll_interval,
+        )
+
+    def _sensor_poll_loop(self):
+        while not self._sensor_poll_stop.is_set():
+            try:
+                current_level = GPIO.input(self.ir_pin)
+                previous_level = self._last_sensor_level
+                self._last_sensor_level = current_level
+
+                if previous_level == GPIO.HIGH and current_level == GPIO.LOW:
+                    self._ir_callback(self.ir_pin)
+            except Exception as exc:
+                self._gpio_ready = False
+                self._gpio_error = f"{type(exc).__name__}: {exc}"
+                self._sensor_error = self._gpio_error
+                logging.exception("Falha ao ler GPIO %s em modo polling.", self.ir_pin)
+                return
+
+            self._sensor_poll_stop.wait(self.sensor_poll_interval)
 
     def _start_ir_emitter(self):
         if not GPIO:
@@ -417,6 +491,9 @@ class Chronometer:
             "gpio_pronto": self._gpio_ready,
             "gpio_erro": self._gpio_error,
             "sensor_gpio_bcm": self.ir_pin,
+            "sensor_modo": self._sensor_mode,
+            "sensor_erro": self._sensor_error,
+            "sensor_poll_interval": self.sensor_poll_interval,
             "pigpio_disponivel": pigpio is not None,
             "pigpio_import_origem": PIGPIO_IMPORT_SOURCE,
             "pigpio_import_erro": PIGPIO_IMPORT_ERROR,
@@ -445,6 +522,10 @@ class Chronometer:
             }
 
     def cleanup(self):
+        if self._sensor_poll_thread and self._sensor_poll_thread.is_alive():
+            self._sensor_poll_stop.set()
+            self._sensor_poll_thread.join(timeout=1)
+
         if self._using_pigpio_pwm and self._pigpio is not None:
             self._pigpio.hardware_PWM(self.ir_led_pin, 0, 0)
             self._pigpio.stop()
