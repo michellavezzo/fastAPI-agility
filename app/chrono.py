@@ -99,13 +99,14 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "38000"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "30000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
-SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.2"))
+SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
-SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "HIGH").strip().upper()
+SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
 SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "auto").strip().lower()
+SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.002"))
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
@@ -146,6 +147,7 @@ class Chronometer:
         sensor_require_rearm=SENSOR_REQUIRE_REARM_DEFAULT,
         sensor_read_mode=SENSOR_READ_MODE_DEFAULT,
         sensor_require_ready=SENSOR_REQUIRE_READY_DEFAULT,
+        sensor_trigger_confirm_time=SENSOR_TRIGGER_CONFIRM_DEFAULT,
         sensor_ignored_log_interval=SENSOR_IGNORED_LOG_INTERVAL_DEFAULT,
     ):
         self.ir_pin = ir_pin if ir_pin is not None else GPIO_PIN_DEFAULT
@@ -155,6 +157,7 @@ class Chronometer:
         self.ir_emitter_enabled = ir_emitter_enabled
         self.sensor_poll_interval = max(0.001, float(sensor_poll_interval))
         self.sensor_rearm_stable_time = max(0.001, float(sensor_rearm_stable_time))
+        self.sensor_trigger_confirm_time = max(0.0, float(sensor_trigger_confirm_time))
         self.sensor_require_rearm = _bool_value(sensor_require_rearm, False)
         self.sensor_require_ready = _bool_value(sensor_require_ready, True)
         self.sensor_read_mode = str(sensor_read_mode).strip().lower()
@@ -423,6 +426,13 @@ class Chronometer:
             "modo": self._sensor_mode,
         }
 
+    def _refresh_sensor_level_locked(self, current_level, now):
+        previous_level = self._last_sensor_level
+        self._last_sensor_level = current_level
+        if previous_level is not None and current_level != previous_level:
+            self._record_sensor_transition_locked(previous_level, current_level)
+        self._update_sensor_rearm_locked(current_level, now)
+
     def _start_ir_emitter(self):
         if not GPIO:
             self._ir_emitter_error = "RPi.GPIO indisponivel"
@@ -484,7 +494,22 @@ class Chronometer:
 
     def _ir_callback(self, channel):
         now = time.perf_counter()
+        confirmed_level = None
+        if channel is not None and self.sensor_trigger_confirm_time > 0 and GPIO is not None:
+            time.sleep(self.sensor_trigger_confirm_time)
+            confirmed_level = GPIO.input(self.ir_pin)
+            now = time.perf_counter()
+
         with self._lock:
+            if confirmed_level is not None:
+                self._refresh_sensor_level_locked(confirmed_level, now)
+                if confirmed_level != self._sensor_active_level():
+                    self._ignore_sensor_trigger_locked(
+                        "pulso descartado: nivel ativo nao permaneceu estavel",
+                        channel,
+                    )
+                    return
+
             if now - self._last_ir_trigger < self.debounce_time:
                 self._ignore_sensor_trigger_locked(
                     f"debounce ativo ({now - self._last_ir_trigger:.3f}s < {self.debounce_time:.3f}s)",
@@ -749,6 +774,7 @@ class Chronometer:
             "sensor_poll_interval": self.sensor_poll_interval,
             "sensor_debounce": self.debounce_time,
             "sensor_rearm_stable": self.sensor_rearm_stable_time,
+            "sensor_trigger_confirm": self.sensor_trigger_confirm_time,
             "sensor_require_rearm": self.sensor_require_rearm,
             "sensor_require_ready": self.sensor_require_ready,
             "sensor_armado": self._sensor_armed,

@@ -241,26 +241,36 @@ def main():
 
         emitter.off()
 
-        baseline_dom = dominant(baseline)
         best_low = max(results, key=lambda item: item[1]["low_pct"], default=None)
         best_high = max(results, key=lambda item: item[1]["high_pct"], default=None)
+        low_delta = (best_low[1]["low_pct"] - baseline["low_pct"]) if best_low else 0
+        high_delta = (best_high[1]["high_pct"] - baseline["high_pct"]) if best_high else 0
 
         print("\nDiagnostico:")
-        if baseline_dom == "LOW":
+        if high_delta >= 40 and high_delta >= low_delta:
             print(
-                "- Com o emissor desligado, o GPIO ja fica LOW. Isso aponta mais para "
-                "pinagem, alimentacao, modulo incompatível ou saida presa do que para frequencia."
+                f"- Receptor respondeu melhor perto de {best_high[0]}Hz: "
+                f"HIGH subiu de {baseline['high_pct']:.1f}% para {best_high[1]['high_pct']:.1f}%."
             )
-        elif best_low and best_low[1]["low_pct"] - baseline["low_pct"] >= 40:
             print(
-                f"- Receptor parece responder perto de {best_low[0]}Hz "
-                f"(LOW subiu para {best_low[1]['low_pct']:.1f}%)."
+                "- Interpretação: feixe alinhado = HIGH; feixe quebrado/sem sinal = LOW."
             )
-        elif best_high and best_high[1]["high_pct"] - baseline["high_pct"] >= 40:
             print(
-                f"- Receptor parece responder com logica invertida perto de {best_high[0]}Hz "
-                f"(HIGH subiu para {best_high[1]['high_pct']:.1f}%)."
+                f"- Configure: export AGILITY_IR_FREQUENCY={best_high[0]}"
             )
+            print("- Configure: export AGILITY_SENSOR_ACTIVE_LEVEL=LOW")
+        elif low_delta >= 40:
+            print(
+                f"- Receptor respondeu melhor perto de {best_low[0]}Hz: "
+                f"LOW subiu de {baseline['low_pct']:.1f}% para {best_low[1]['low_pct']:.1f}%."
+            )
+            print(
+                "- Interpretação: feixe alinhado = LOW; feixe quebrado/sem sinal = HIGH."
+            )
+            print(
+                f"- Configure: export AGILITY_IR_FREQUENCY={best_low[0]}"
+            )
+            print("- Configure: export AGILITY_SENSOR_ACTIVE_LEVEL=HIGH")
         else:
             print(
                 "- Nenhuma frequencia testada mudou claramente o GPIO. Verifique pinagem do sensor, "
