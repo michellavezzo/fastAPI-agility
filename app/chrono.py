@@ -766,8 +766,18 @@ class Chronometer:
 
         with self._lock:
             if confirmed_level is not None:
+                previous_level = self._last_sensor_level
                 self._refresh_sensor_level_locked(confirmed_level, confirmed_at)
-                if confirmed_level != self._sensor_active_level():
+                self._update_beam_state_locked(previous_level, confirmed_level, confirmed_at)
+
+                if self.ir_burst_enabled:
+                    if self._beam_aligned:
+                        self._ignore_sensor_trigger_locked(
+                            "pulso descartado: feixe logico voltou antes da confirmacao",
+                            channel,
+                        )
+                        return
+                elif confirmed_level != self._sensor_active_level():
                     self._ignore_sensor_trigger_locked(
                         "pulso descartado: nivel ativo nao permaneceu estavel",
                         channel,
