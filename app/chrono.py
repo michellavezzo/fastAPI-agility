@@ -99,19 +99,19 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "27000"))
-IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "20"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "19500"))
+IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "33"))
 IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
-IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.002"))
+IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.020"))
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
 SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
 SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "polling").strip().lower()
 SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.015"))
-SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.02"))
+SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.05"))
 SENSOR_READY_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_CONFIRM", "0.05"))
-SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.6"))
+SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.8"))
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
@@ -128,7 +128,7 @@ def _env_bool(name, default=True):
 
 
 IR_EMITTER_ENABLED_DEFAULT = _env_bool("AGILITY_IR_EMITTER_ENABLED", True)
-IR_BURST_ENABLED_DEFAULT = _env_bool("AGILITY_IR_BURST_ENABLED", False)
+IR_BURST_ENABLED_DEFAULT = _env_bool("AGILITY_IR_BURST_ENABLED", True)
 SENSOR_REQUIRE_REARM_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_REARM", False)
 SENSOR_REQUIRE_READY_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_READY", True)
 
@@ -464,7 +464,12 @@ class Chronometer:
             self._beam_aligned = False
 
         if was_aligned and not self._beam_aligned:
-            self._beam_last_break_at = now
+            expected_next_signal_at = (
+                self._beam_last_signal_at + self.ir_burst_on_time + self.ir_burst_off_time
+                if self._beam_last_signal_at is not None
+                else now
+            )
+            self._beam_last_break_at = min(now, expected_next_signal_at)
             self._beam_break_count += 1
             return True
 
@@ -474,6 +479,15 @@ class Chronometer:
         if not self._gpio_ready or self._last_sensor_level is None:
             self._sensor_last_ready_check = None
             return True
+
+        if self.ir_burst_enabled:
+            ready_stats = self._sample_logical_beam_locked(
+                duration=self.sensor_ready_confirm_time,
+            )
+            self._sensor_last_ready_check = ready_stats
+            if ready_stats is None:
+                return self._beam_aligned
+            return ready_stats["expected_ratio"] >= self.sensor_ready_min_ratio
 
         ready_stats = self._sample_sensor_level_locked(
             expected_level=self._sensor_inactive_level(),
@@ -504,6 +518,78 @@ class Chronometer:
         if previous_level is not None and current_level != previous_level:
             self._record_sensor_transition_locked(previous_level, current_level)
         self._update_sensor_rearm_locked(current_level, now)
+
+    def _sample_logical_beam_locked(self, duration):
+        if GPIO is None or not self._gpio_ready:
+            return None
+
+        samples = 0
+        aligned_samples = 0
+        raw_high_samples = 0
+        raw_low_samples = 0
+        transitions = 0
+        logical_breaks = 0
+        first_level = None
+        first_aligned = None
+        last_aligned = None
+        previous_level = self._last_sensor_level
+        previous_aligned = self._beam_aligned
+        deadline = time.perf_counter() + duration
+        interval = max(0.001, min(self.sensor_poll_interval, 0.005))
+
+        while True:
+            current_level = GPIO.input(self.ir_pin)
+            now = time.perf_counter()
+            self._refresh_sensor_level_locked(current_level, now)
+            self._update_beam_state_locked(previous_level, current_level, now)
+
+            if first_level is None:
+                first_level = current_level
+                first_aligned = self._beam_aligned
+            if previous_level is not None and current_level != previous_level:
+                transitions += 1
+            if previous_aligned and not self._beam_aligned:
+                logical_breaks += 1
+
+            previous_level = current_level
+            previous_aligned = self._beam_aligned
+            last_aligned = self._beam_aligned
+
+            samples += 1
+            if self._beam_aligned:
+                aligned_samples += 1
+            if current_level == self._gpio_high():
+                raw_high_samples += 1
+            else:
+                raw_low_samples += 1
+
+            if now >= deadline:
+                break
+            time.sleep(interval)
+
+        expected_ratio = aligned_samples / samples if samples else 0
+        return {
+            "expected_level": "feixe_logico_alinhado",
+            "expected_ratio": round(expected_ratio, 3),
+            "samples": samples,
+            "signal_samples": aligned_samples,
+            "high": raw_high_samples,
+            "low": raw_low_samples,
+            "transitions": transitions,
+            "logical_breaks": logical_breaks,
+            "first": first_level,
+            "last": previous_level,
+            "first_aligned": first_aligned,
+            "last_aligned": last_aligned,
+            "duration": duration,
+            "min_ratio": self.sensor_ready_min_ratio,
+            "ultimo_sinal_atras_s": (
+                round(time.perf_counter() - self._beam_last_signal_at, 3)
+                if self._beam_last_signal_at is not None
+                else None
+            ),
+            "hora": datetime.now().isoformat(),
+        }
 
     def _sample_sensor_level_locked(self, expected_level, duration):
         if GPIO is None or not self._gpio_ready:
