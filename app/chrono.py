@@ -99,19 +99,19 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "31000"))
-IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "27000"))
+IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "20"))
 IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
 IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.002"))
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
 SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
-SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "auto").strip().lower()
-SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0"))
+SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "polling").strip().lower()
+SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.015"))
 SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.02"))
 SENSOR_READY_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_CONFIRM", "0.05"))
-SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.8"))
+SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.6"))
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
@@ -670,16 +670,17 @@ class Chronometer:
         self._set_ir_carrier_active(False, duty_cycle)
 
     def _ir_callback(self, channel, event_time=None):
-        now = event_time if event_time is not None else time.perf_counter()
+        trigger_time = event_time if event_time is not None else time.perf_counter()
         confirmed_level = None
+        confirmed_at = trigger_time
         if channel is not None and self.sensor_trigger_confirm_time > 0 and GPIO is not None:
             time.sleep(self.sensor_trigger_confirm_time)
             confirmed_level = GPIO.input(self.ir_pin)
-            now = time.perf_counter()
+            confirmed_at = time.perf_counter()
 
         with self._lock:
             if confirmed_level is not None:
-                self._refresh_sensor_level_locked(confirmed_level, now)
+                self._refresh_sensor_level_locked(confirmed_level, confirmed_at)
                 if confirmed_level != self._sensor_active_level():
                     self._ignore_sensor_trigger_locked(
                         "pulso descartado: nivel ativo nao permaneceu estavel",
@@ -687,9 +688,9 @@ class Chronometer:
                     )
                     return
 
-            if now - self._last_ir_trigger < self.debounce_time:
+            if trigger_time - self._last_ir_trigger < self.debounce_time:
                 self._ignore_sensor_trigger_locked(
-                    f"debounce ativo ({now - self._last_ir_trigger:.3f}s < {self.debounce_time:.3f}s)",
+                    f"debounce ativo ({trigger_time - self._last_ir_trigger:.3f}s < {self.debounce_time:.3f}s)",
                     channel,
                 )
                 return
@@ -708,20 +709,20 @@ class Chronometer:
                 )
                 return
 
-            self._last_ir_trigger = now
+            self._last_ir_trigger = trigger_time
             if channel is not None and self.sensor_require_rearm:
                 self._sensor_armed = False
                 self._sensor_high_since = None
 
             if self._estado == "autorizado":
-                self._t_inicio_prova = now
+                self._t_inicio_prova = trigger_time
                 self._hora_inicio_prova = datetime.now().isoformat()
                 self._estado = "rodando"
                 self._mark_state_changed_locked()
                 self._record_sensor_event_locked("aceito_inicio", channel)
                 logging.info(f"Prova iniciada. TIA: {self._get_tia():.3f}s")
             elif self._estado == "rodando":
-                self._t_fim_prova = now
+                self._t_fim_prova = trigger_time
                 self._hora_fim_prova = datetime.now().isoformat()
                 self._estado = "finalizado"
                 self._mark_state_changed_locked()
