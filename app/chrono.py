@@ -99,7 +99,7 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "19500"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "19000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "33"))
 IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
 IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.020"))
