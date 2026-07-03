@@ -82,7 +82,7 @@ export AGILITY_IR_BURST_ENABLED=1
 export AGILITY_IR_BURST_ON=0.002
 export AGILITY_IR_BURST_OFF=0.018
 export AGILITY_SENSOR_ACTIVE_LEVEL=LOW
-export AGILITY_SENSOR_SIGNAL_TIMEOUT=0.06
+export AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12
 export AGILITY_SENSOR_TRIGGER_CONFIRM=0.002
 export AGILITY_SENSOR_READY_MIN_RATIO=0.2
 ```
@@ -93,7 +93,7 @@ Justificativa do envelope padrao:
 - A portadora continua em `56000Hz` gerou leitura inicial, mas perdeu estabilidade rapidamente.
 - A rajada `2ms/2ms` tambem funcionou no inicio, mas saturou em aproximadamente `3s` no teste de 5s.
 - A rajada `2ms/18ms` manteve pulsos ate o final do teste de 5s, com cerca de `10%` das leituras em nivel de sinal e lacuna maxima observada de aproximadamente `20ms`.
-- Por isso o default passou a usar `AGILITY_IR_BURST_ON=0.002`, `AGILITY_IR_BURST_OFF=0.018` e `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.06`, permitindo tolerar pequenas perdas de pulso sem tratar cada pausa da rajada como quebra do feixe.
+- Por isso o default passou a usar `AGILITY_IR_BURST_ON=0.002`, `AGILITY_IR_BURST_OFF=0.018` e `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12`, permitindo tolerar pequenas perdas de pulso sem tratar cada pausa da rajada como quebra do feixe. O timeout foi mantido acima da lacuna ideal de `20ms` porque o backend real pode ter jitter de polling quando esta atendendo API/WebSocket.
 
 Observacao eletrica:
 

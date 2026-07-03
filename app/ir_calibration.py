@@ -348,7 +348,7 @@ def build_recommendation(GPIO, duty, baseline, sensitive, hold_results):
         None,
     )
     burst_on, burst_off = recommended_burst_times(matching_hold)
-    signal_timeout = max(0.06, (burst_on + burst_off) * 3)
+    signal_timeout = max(0.12, (burst_on + burst_off) * 6)
     baseline_signal_pct = level_pct(GPIO, baseline, signal_level)
 
     return {
