@@ -94,7 +94,7 @@ Observações:
 
 ## Raspberry Pi: sensor IR e LED IR
 
-A implementação segue a lógica do código Arduino: o receptor IR fica em entrada com pull-up e o LED IR é pulsado em 38 kHz.
+A implementação segue a lógica de receptores IR demodulados: o receptor fica em entrada com pull-up e o LED IR emite uma portadora PWM em rajadas curtas. A frequência exata depende do sensor real e deve ser calibrada com `rasp_scripts/testar_sensor_ir.py`.
 
 Pinos padrão em modo BCM:
 
@@ -148,11 +148,11 @@ export AGILITY_SENSOR_READY_MIN_RATIO=0.2
 export AGILITY_SENSOR_IGNORED_LOG_INTERVAL=2.0
 ```
 
-O modo padrão `AGILITY_SENSOR_READ_MODE=auto` tenta usar interrupção por borda com `GPIO.add_event_detect`, que é o caminho de menor latência no Raspberry Pi. Se a interrupção falhar, o backend volta automaticamente para polling rápido com `AGILITY_SENSOR_POLL_INTERVAL=0.001`. Para seguir exatamente o loop do tutorial, use `AGILITY_SENSOR_READ_MODE=polling`.
+O modo padrão `AGILITY_SENSOR_READ_MODE=auto` tenta usar interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para evitar que cada pulso da rajada seja tratado como largada/chegada. O evento de prova é disparado apenas quando o backend deixa de receber pulsos recentes por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
 
-O teste do sensor atual mostrou resposta clara perto de `31000Hz`: com o emissor desligado o GPIO fica `LOW`, em `31000Hz` fica majoritariamente `HIGH`. Para esse sensor, o feixe alinhado é `HIGH` e o feixe quebrado/sem sinal é `LOW`; por isso o padrão do projeto passa a ser `AGILITY_IR_FREQUENCY=31000` e `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`.
+O circuito com LED indicador costuma ficar aceso sem sinal e apagar quando o receptor detecta IR. Nessa montagem, o GPIO normalmente fica `HIGH` com feixe alinhado e `LOW` com feixe quebrado/sem sinal; por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`. Confirme sempre com o script de teste, porque a ligação elétrica pode inverter esse comportamento.
 
-Como esse tipo de receptor pode ignorar portadora contínua depois de alguns segundos, o emissor usa rajadas por padrão com `AGILITY_IR_BURST_ENABLED=1`, `AGILITY_IR_BURST_ON=0.002` e `AGILITY_IR_BURST_OFF=0.002`. O backend considera o feixe alinhado enquanto recebe pulsos recentes; se passar `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.03` sem pulsos, considera feixe quebrado.
+Como esse tipo de receptor pode ignorar portadora contínua depois de algum tempo, o emissor usa rajadas por padrão com `AGILITY_IR_BURST_ENABLED=1`, `AGILITY_IR_BURST_ON=0.002` e `AGILITY_IR_BURST_OFF=0.002`. O backend considera o feixe alinhado enquanto recebe pulsos recentes; se passar `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.03` sem pulsos, considera feixe quebrado.
 
 Para evitar duplo disparo quando o cachorro cruza o feixe, o backend ignora novas bordas durante `AGILITY_SENSOR_DEBOUNCE`. O bloqueio por rearme físico fica desligado por padrão com `AGILITY_SENSOR_REQUIRE_REARM=0`, porque alguns receptores IR não voltam para o nível livre de forma estável. Use `AGILITY_SENSOR_REQUIRE_REARM=1` apenas se `GET /hardware/estado` mostrar `sensor_estado_sinal` alternando de forma limpa entre `feixe_alinhado` e `feixe_quebrado`. `AGILITY_SENSOR_TRIGGER_CONFIRM=0.002` confirma que o nível ativo permaneceu estável por 2 ms antes de aceitar a largada/chegada.
 
@@ -166,6 +166,6 @@ Para sensor desconhecido, pare o backend e rode:
 python rasp_scripts/testar_sensor_ir.py
 ```
 
-O script mede o GPIO com o emissor desligado e depois varre frequências de 30 kHz a 60 kHz. Use a frequência que produzir diferença clara em relação ao emissor desligado; se a resposta for `HIGH` com feixe alinhado, configure `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`.
+O script mede o GPIO com o emissor desligado, varre frequências de 10 kHz a 60 kHz e, nas frequências sensíveis, mantém a portadora contínua por 1 segundo para estimar se/quando o sensor satura. Ao final ele imprime os `export AGILITY_*` recomendados para o backend. Use esses valores depois de reiniciar o serviço.
 
 Nunca conecte 5V direto no GPIO17 ou no GPIO18.

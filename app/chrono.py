@@ -99,19 +99,19 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "19000"))
-IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "33"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "31000"))
+IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
 IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
-IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.020"))
+IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.002"))
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
 SENSOR_ACTIVE_LEVEL_DEFAULT = os.environ.get("AGILITY_SENSOR_ACTIVE_LEVEL", "LOW").strip().upper()
-SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "polling").strip().lower()
-SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.015"))
-SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.05"))
+SENSOR_READ_MODE_DEFAULT = os.environ.get("AGILITY_SENSOR_READ_MODE", "auto").strip().lower()
+SENSOR_TRIGGER_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_TRIGGER_CONFIRM", "0.002"))
+SENSOR_SIGNAL_TIMEOUT_DEFAULT = float(os.environ.get("AGILITY_SENSOR_SIGNAL_TIMEOUT", "0.03"))
 SENSOR_READY_CONFIRM_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_CONFIRM", "0.05"))
-SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.8"))
+SENSOR_READY_MIN_RATIO_DEFAULT = float(os.environ.get("AGILITY_SENSOR_READY_MIN_RATIO", "0.2"))
 SENSOR_IGNORED_LOG_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_IGNORED_LOG_INTERVAL", "2.0"))
 
 
@@ -192,6 +192,19 @@ class Chronometer:
                 self.sensor_active_level,
             )
             self.sensor_active_level = "LOW"
+        if self.ir_burst_enabled:
+            min_signal_timeout = max(
+                self.sensor_poll_interval * 3,
+                (self.ir_burst_on_time + self.ir_burst_off_time) * 3,
+            )
+            if self.sensor_signal_timeout < min_signal_timeout:
+                logging.warning(
+                    "AGILITY_SENSOR_SIGNAL_TIMEOUT %.3fs menor que o minimo seguro %.3fs "
+                    "para rajadas IR. Ajustando automaticamente.",
+                    self.sensor_signal_timeout,
+                    min_signal_timeout,
+                )
+                self.sensor_signal_timeout = min_signal_timeout
         self.sensor_ignored_log_interval = max(0.1, float(sensor_ignored_log_interval))
         self._ir_pwm = None
         self._ir_burst_thread = None
@@ -1098,6 +1111,12 @@ class Chronometer:
             "emissor_rajada_habilitada": self.ir_burst_enabled,
             "emissor_rajada_on": self.ir_burst_on_time,
             "emissor_rajada_off": self.ir_burst_off_time,
+            "emissor_rajada_periodo": self.ir_burst_on_time + self.ir_burst_off_time,
+            "emissor_thread_ativa": (
+                self._ir_burst_thread.is_alive()
+                if self._ir_burst_thread is not None
+                else False
+            ),
             "frequencia_hz": self.ir_frequency,
             "duty_cycle": self.ir_duty_cycle,
         }
