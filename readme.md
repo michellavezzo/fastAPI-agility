@@ -87,7 +87,7 @@ Para calibrar, pare o backend na Raspberry e rode:
 python rasp_scripts/testar_sensor_ir.py
 ```
 
-O script varre de 10 kHz a 60 kHz, mantém a portadora contínua por 1 segundo nas frequências sensíveis e imprime os `export AGILITY_*` recomendados.
+O script varre de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões, mantém a portadora contínua por 1 segundo nas frequências sensíveis e imprime os `export AGILITY_*` recomendados.
 
 - Dê permissão de execução com
 

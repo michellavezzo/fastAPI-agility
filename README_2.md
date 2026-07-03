@@ -166,6 +166,6 @@ Para sensor desconhecido, pare o backend e rode:
 python rasp_scripts/testar_sensor_ir.py
 ```
 
-O script mede o GPIO com o emissor desligado, varre frequências de 10 kHz a 60 kHz e, nas frequências sensíveis, mantém a portadora contínua por 1 segundo para estimar se/quando o sensor satura. Ao final ele imprime os `export AGILITY_*` recomendados para o backend. Use esses valores depois de reiniciar o serviço.
+O script mede o GPIO com o emissor desligado, varre frequências de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões e, nas frequências sensíveis, mantém a portadora contínua por 1 segundo para estimar se/quando o sensor satura. Ao final ele imprime os `export AGILITY_*` recomendados para o backend. Use esses valores depois de reiniciar o serviço.
 
 Nunca conecte 5V direto no GPIO17 ou no GPIO18.

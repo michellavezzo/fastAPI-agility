@@ -20,6 +20,12 @@ def parse_args():
     parser.add_argument("--duration", type=float, default=0.35, help="Tempo de leitura por frequencia.")
     parser.add_argument("--interval", type=float, default=0.001, help="Intervalo entre leituras do GPIO.")
     parser.add_argument("--settle", type=float, default=0.08, help="Espera apos mudar frequencia.")
+    parser.add_argument(
+        "--recovery",
+        type=float,
+        default=1.0,
+        help="Tempo com emissor desligado entre emissoes para o receptor sair de saturacao.",
+    )
     parser.add_argument("--start", type=int, default=10000, help="Frequencia inicial da varredura.")
     parser.add_argument("--stop", type=int, default=60000, help="Frequencia final da varredura.")
     parser.add_argument("--step", type=int, default=1000, help="Passo da varredura.")
@@ -365,8 +371,10 @@ def choose_recommendation(sensitive, hold_results):
 def recommended_burst_times(hold_stats):
     default_on = 0.002
     default_off = 0.002
-    if not hold_stats or hold_stats["lost_after"] is None or hold_stats["lost_after"] <= 0:
+    if not hold_stats or hold_stats["lost_after"] is None:
         return default_on, default_off
+    if hold_stats["lost_after"] <= 0:
+        return 0.0005, default_off
 
     burst_on = max(0.0005, min(default_on, hold_stats["lost_after"] / 4))
     burst_off = max(default_off, burst_on)
@@ -463,17 +471,20 @@ def main():
         print("Pare o backend antes deste teste para evitar disputa pelo GPIO.")
         print(f"Sensor GPIO{args.sensor_pin}; emissor GPIO{args.emitter_pin}; duty {args.duty}%.")
         emitter.off()
-        time.sleep(args.settle)
+        time.sleep(args.recovery)
         baseline = read_window(GPIO, args.sensor_pin, args.duration, args.interval)
         print_stats("OFF", baseline)
 
         results = []
         for freq in frequency_list(args):
+            emitter.off()
+            time.sleep(args.recovery)
             emitter.set_frequency(freq)
             time.sleep(args.settle)
             stats = read_window(GPIO, args.sensor_pin, args.duration, args.interval)
             results.append((freq, stats))
             print_stats(f"{freq}Hz", stats)
+            emitter.off()
 
         emitter.off()
 
@@ -488,6 +499,8 @@ def main():
             print("\nTeste de saturacao com portadora continua:")
             for scan in sensitive:
                 freq = scan["freq"]
+                emitter.off()
+                time.sleep(args.recovery)
                 emitter.set_frequency(freq)
                 time.sleep(args.settle)
                 hold = read_saturation_window(
