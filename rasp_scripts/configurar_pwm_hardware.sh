@@ -27,6 +27,52 @@ else
 fi
 
 echo
+echo "Instalando servico de permissao para /sys/class/pwm"
+sudo tee /usr/local/sbin/agility-pwm-permissions.sh >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+PWM_LINK="/sys/class/pwm/pwmchip0"
+
+for _ in $(seq 1 50); do
+  [[ -d "$PWM_LINK" ]] && break
+  sleep 0.1
+done
+
+[[ -d "$PWM_LINK" ]] || exit 0
+
+PWM_REAL="$(realpath "$PWM_LINK")"
+
+chgrp -R gpio "$PWM_REAL"
+chmod -R g+rwX "$PWM_REAL"
+
+if [[ ! -d "$PWM_REAL/pwm0" ]]; then
+  echo 0 > "$PWM_LINK/export" 2>/dev/null || true
+fi
+
+chgrp -R gpio "$PWM_REAL"
+chmod -R g+rwX "$PWM_REAL"
+EOF
+
+sudo chmod +x /usr/local/sbin/agility-pwm-permissions.sh
+sudo tee /etc/systemd/system/agility-pwm-permissions.service >/dev/null <<'EOF'
+[Unit]
+Description=Agility IR PWM sysfs permissions
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/agility-pwm-permissions.sh
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable agility-pwm-permissions.service >/dev/null
+sudo systemctl start agility-pwm-permissions.service || true
+
+echo
 echo "Reinicie a Raspberry para o overlay carregar:"
 echo "  sudo reboot"
 echo
