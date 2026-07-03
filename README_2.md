@@ -90,7 +90,8 @@ Observações:
 - Na Raspberry Pi com GPIO, rode o backend sem `--reload`; o reload cria processo supervisor e pode inicializar hardware mais de uma vez durante desenvolvimento.
 - Se aparecer `No module named sqlalchemy` ou `No module named uvicorn`, rode novamente `rasp_scripts/instalar_dependencias.sh`.
 - Na Raspberry Pi, o script tenta instalar `RPi.GPIO`; se isso falhar, o backend ainda pode rodar em modo sem GPIO.
-- `pigpio` é opcional. Se o APT responder `Package 'pigpio' has no installation candidate`, ignore esse pacote: o código usa `RPi.GPIO.PWM` para o emissor IR quando `pigpio` não está disponível.
+- Para PWM estável no emissor IR, instale e habilite o daemon `pigpiod`: `sudo apt install pigpio python3-pigpio` e `sudo systemctl enable --now pigpiod`. O backend usa `pigpio.hardware_PWM` em `GPIO18` quando disponível.
+- Com `AGILITY_IR_PWM_BACKEND=pigpio`, falha de `pigpiod` deixa o emissor em erro explícito. Com `AGILITY_IR_PWM_BACKEND=auto`, o backend tenta `pigpio.hardware_PWM` e cai para `RPi.GPIO.PWM` se necessário.
 
 ## Raspberry Pi: sensor IR e LED IR
 
@@ -128,8 +129,9 @@ Variáveis para trocar os pinos ou desabilitar o emissor:
 ```bash
 export AGILITY_GPIO_PIN=17
 export AGILITY_IR_LED_PIN=18
-export AGILITY_IR_FREQUENCY=31000
+export AGILITY_IR_FREQUENCY=56000
 export AGILITY_IR_DUTY_CYCLE=50
+export AGILITY_IR_PWM_BACKEND=auto
 export AGILITY_IR_EMITTER_ENABLED=1
 export AGILITY_IR_BURST_ENABLED=1
 export AGILITY_IR_BURST_ON=0.002
@@ -148,6 +150,17 @@ export AGILITY_SENSOR_READY_MIN_RATIO=0.2
 export AGILITY_SENSOR_IGNORED_LOG_INTERVAL=2.0
 ```
 
+Calibração automática opcional:
+
+```bash
+export AGILITY_IR_CALIBRATE_ON_STARTUP=1
+export AGILITY_IR_CALIBRATION_APPLY=1
+export AGILITY_IR_CALIBRATION_SAVE=1
+export AGILITY_IR_USE_SAVED_CALIBRATION=1
+```
+
+Quando `AGILITY_IR_CALIBRATE_ON_STARTUP=1`, o backend bloqueia o startup até terminar a varredura. O resultado fica salvo em `ir_calibration.json` e também pode ser gerado pela tela `/config` ou pelo endpoint `POST /config/ir/calibracao`.
+
 O modo padrão `AGILITY_SENSOR_READ_MODE=auto` tenta usar interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para evitar que cada pulso da rajada seja tratado como largada/chegada. O evento de prova é disparado apenas quando o backend deixa de receber pulsos recentes por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
 
 O circuito com LED indicador costuma ficar aceso sem sinal e apagar quando o receptor detecta IR. Nessa montagem, o GPIO normalmente fica `HIGH` com feixe alinhado e `LOW` com feixe quebrado/sem sinal; por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`. Confirme sempre com o script de teste, porque a ligação elétrica pode inverter esse comportamento.
@@ -163,9 +176,9 @@ Para evitar bloqueio por uma queda curta do receptor, a autorização não usa a
 Para sensor desconhecido, pare o backend e rode:
 
 ```bash
-python rasp_scripts/testar_sensor_ir.py
+python rasp_scripts/testar_sensor_ir.py --pwm-backend pigpio
 ```
 
 O script mede o GPIO com o emissor desligado, varre frequências de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões e, nas frequências sensíveis, mantém a portadora contínua por 1 segundo para estimar se/quando o sensor satura. Ao final ele imprime os `export AGILITY_*` recomendados para o backend. Use esses valores depois de reiniciar o serviço.
 
-Nunca conecte 5V direto no GPIO17 ou no GPIO18.
+Nunca conecte 5V direto no GPIO17 ou no GPIO18. Se o receptor estiver alimentado em 5V como no diagrama do TCC, confirme com multímetro/osciloscópio que o OUT recebido pelo GPIO17 não passa de 3.3V; se passar, use divisor resistivo, level shifter ou saída open-collector com pull-up em 3.3V.

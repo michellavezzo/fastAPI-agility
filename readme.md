@@ -55,13 +55,15 @@ Na Raspberry Pi, instale primeiro o pacote de GPIO do sistema:
 
 ```bash
 sudo apt update
-sudo apt install python3-rpi.gpio
+sudo apt install python3-rpi.gpio pigpio python3-pigpio
+sudo systemctl enable --now pigpiod
 ```
 
 Configuração recomendada para o circuito IR. Ajuste `AGILITY_IR_FREQUENCY` com o resultado de `rasp_scripts/testar_sensor_ir.py`:
 
 ```bash
-export AGILITY_IR_FREQUENCY=31000
+export AGILITY_IR_FREQUENCY=56000
+export AGILITY_IR_PWM_BACKEND=auto
 export AGILITY_IR_BURST_ENABLED=1
 export AGILITY_IR_BURST_ON=0.002
 export AGILITY_IR_BURST_OFF=0.002
@@ -76,6 +78,14 @@ export AGILITY_SENSOR_READY_MIN_RATIO=0.2
 export AGILITY_SENSOR_REQUIRE_READY=1
 ```
 
+Para calibrar automaticamente no startup e salvar a recomendação:
+
+```bash
+export AGILITY_IR_CALIBRATE_ON_STARTUP=1
+export AGILITY_IR_CALIBRATION_APPLY=1
+export AGILITY_IR_CALIBRATION_SAVE=1
+```
+
 `AGILITY_SENSOR_READ_MODE=auto` tenta interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para que as rajadas não gerem falsos eventos.
 No circuito com LED indicador, o LED costuma ficar ligado sem sinal e apagar quando o receptor detecta IR. Nessa montagem, o feixe alinhado normalmente deixa o GPIO em `HIGH`, e o feixe quebrado/sem sinal deixa em `LOW`. Por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`.
 Como esse tipo de receptor pode bloquear portadora contínua, o emissor usa rajadas: 2 ms ligado e 2 ms desligado. O backend considera o feixe alinhado enquanto enxerga pulsos recentes, controlado por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
@@ -84,10 +94,12 @@ Na autorização da largada, o backend amostra o GPIO por `AGILITY_SENSOR_READY_
 Para calibrar, pare o backend na Raspberry e rode:
 
 ```bash
-python rasp_scripts/testar_sensor_ir.py
+python rasp_scripts/testar_sensor_ir.py --pwm-backend pigpio
 ```
 
-O script varre de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões, mantém a portadora contínua por 1 segundo nas frequências sensíveis e imprime os `export AGILITY_*` recomendados.
+O script varre de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões, mantém a portadora contínua por 1 segundo nas frequências sensíveis e imprime os `export AGILITY_*` recomendados. A mesma calibração também pode ser executada na tela `/config`.
+
+Se o receptor estiver alimentado em 5V como no diagrama do TCC, confirme que o sinal no GPIO17 não passa de 3.3V antes de ligar diretamente na Raspberry Pi.
 
 - Dê permissão de execução com
 

@@ -5,8 +5,17 @@ import logging
 import importlib
 import platform
 import sys
+import copy
+import json
 from datetime import datetime
 from pathlib import Path
+
+from .ir_calibration import (
+    CalibrationError,
+    HARDWARE_PWM_PINS,
+    normalize_pwm_backend,
+    run_ir_calibration,
+)
 
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -99,10 +108,11 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "31000"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "56000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
 IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
 IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.002"))
+IR_PWM_BACKEND_DEFAULT = os.environ.get("AGILITY_IR_PWM_BACKEND", "auto").strip().lower()
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
@@ -129,6 +139,23 @@ def _env_bool(name, default=True):
 
 IR_EMITTER_ENABLED_DEFAULT = _env_bool("AGILITY_IR_EMITTER_ENABLED", True)
 IR_BURST_ENABLED_DEFAULT = _env_bool("AGILITY_IR_BURST_ENABLED", True)
+IR_CALIBRATE_ON_STARTUP_DEFAULT = _env_bool("AGILITY_IR_CALIBRATE_ON_STARTUP", False)
+IR_CALIBRATION_APPLY_DEFAULT = _env_bool("AGILITY_IR_CALIBRATION_APPLY", True)
+IR_CALIBRATION_SAVE_DEFAULT = _env_bool("AGILITY_IR_CALIBRATION_SAVE", True)
+IR_USE_SAVED_CALIBRATION_DEFAULT = _env_bool("AGILITY_IR_USE_SAVED_CALIBRATION", True)
+IR_CALIBRATION_START_DEFAULT = int(os.environ.get("AGILITY_IR_CALIBRATION_START", "10000"))
+IR_CALIBRATION_STOP_DEFAULT = int(os.environ.get("AGILITY_IR_CALIBRATION_STOP", "60000"))
+IR_CALIBRATION_STEP_DEFAULT = int(os.environ.get("AGILITY_IR_CALIBRATION_STEP", "1000"))
+IR_CALIBRATION_DURATION_DEFAULT = float(os.environ.get("AGILITY_IR_CALIBRATION_DURATION", "0.35"))
+IR_CALIBRATION_SETTLE_DEFAULT = float(os.environ.get("AGILITY_IR_CALIBRATION_SETTLE", "0.08"))
+IR_CALIBRATION_RECOVERY_DEFAULT = float(os.environ.get("AGILITY_IR_CALIBRATION_RECOVERY", "1.0"))
+IR_CALIBRATION_HOLD_DEFAULT = float(os.environ.get("AGILITY_IR_CALIBRATION_HOLD", "1.0"))
+IR_CALIBRATION_SENSITIVITY_DELTA_DEFAULT = float(
+    os.environ.get("AGILITY_IR_CALIBRATION_SENSITIVITY_DELTA", "25")
+)
+IR_CALIBRATION_SATURATION_GAP_DEFAULT = float(
+    os.environ.get("AGILITY_IR_CALIBRATION_SATURATION_GAP", "0.05")
+)
 SENSOR_REQUIRE_REARM_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_REARM", False)
 SENSOR_REQUIRE_READY_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_READY", True)
 
@@ -146,6 +173,7 @@ class Chronometer:
         ir_led_pin=None,
         ir_frequency=IR_FREQUENCY_DEFAULT,
         ir_duty_cycle=IR_DUTY_CYCLE_DEFAULT,
+        ir_pwm_backend=IR_PWM_BACKEND_DEFAULT,
         ir_emitter_enabled=IR_EMITTER_ENABLED_DEFAULT,
         ir_burst_enabled=IR_BURST_ENABLED_DEFAULT,
         ir_burst_on_time=IR_BURST_ON_DEFAULT,
@@ -166,6 +194,7 @@ class Chronometer:
         self.ir_led_pin = ir_led_pin if ir_led_pin is not None else IR_LED_PIN_DEFAULT
         self.ir_frequency = ir_frequency
         self.ir_duty_cycle = ir_duty_cycle
+        self.ir_pwm_backend = normalize_pwm_backend(ir_pwm_backend)
         self.ir_emitter_enabled = ir_emitter_enabled
         self.ir_burst_enabled = _bool_value(ir_burst_enabled, True)
         self.ir_burst_on_time = max(0.0005, float(ir_burst_on_time))
@@ -192,19 +221,6 @@ class Chronometer:
                 self.sensor_active_level,
             )
             self.sensor_active_level = "LOW"
-        if self.ir_burst_enabled:
-            min_signal_timeout = max(
-                self.sensor_poll_interval * 3,
-                (self.ir_burst_on_time + self.ir_burst_off_time) * 3,
-            )
-            if self.sensor_signal_timeout < min_signal_timeout:
-                logging.warning(
-                    "AGILITY_SENSOR_SIGNAL_TIMEOUT %.3fs menor que o minimo seguro %.3fs "
-                    "para rajadas IR. Ajustando automaticamente.",
-                    self.sensor_signal_timeout,
-                    min_signal_timeout,
-                )
-                self.sensor_signal_timeout = min_signal_timeout
         self.sensor_ignored_log_interval = max(0.1, float(sensor_ignored_log_interval))
         self._ir_pwm = None
         self._ir_burst_thread = None
@@ -238,6 +254,28 @@ class Chronometer:
         self._beam_last_break_at = None
         self._beam_break_count = 0
         self._last_authorize_error = None
+        self._calibration_lock = threading.Lock()
+        self._calibration_store_path = Path(
+            os.environ.get(
+                "AGILITY_IR_CALIBRATION_FILE",
+                str(Path(__file__).resolve().parent.parent / "ir_calibration.json"),
+            )
+        )
+        self._calibration_last_result = self._load_ir_calibration_file()
+        self._calibration_running = False
+        self._calibration_status = {
+            "running": False,
+            "phase": None,
+            "frequency_hz": None,
+            "started_at": None,
+            "finished_at": None,
+            "error": None,
+            "last_result": self._calibration_last_result,
+            "store_path": str(self._calibration_store_path),
+        }
+        if IR_USE_SAVED_CALIBRATION_DEFAULT:
+            self._apply_saved_ir_calibration()
+        self._ensure_signal_timeout_safe()
         self.debounce_time = max(0.001, float(debounce_time))
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
@@ -291,6 +329,123 @@ class Chronometer:
                 self._gpio_ready = False
                 self._gpio_error = f"{type(exc).__name__}: {exc}"
                 logging.exception("Falha ao inicializar GPIO do cronometro.")
+
+    def _ensure_signal_timeout_safe(self):
+        if not self.ir_burst_enabled:
+            return
+
+        min_signal_timeout = max(
+            self.sensor_poll_interval * 3,
+            (self.ir_burst_on_time + self.ir_burst_off_time) * 3,
+        )
+        if self.sensor_signal_timeout < min_signal_timeout:
+            logging.warning(
+                "AGILITY_SENSOR_SIGNAL_TIMEOUT %.3fs menor que o minimo seguro %.3fs "
+                "para rajadas IR. Ajustando automaticamente.",
+                self.sensor_signal_timeout,
+                min_signal_timeout,
+            )
+            self.sensor_signal_timeout = min_signal_timeout
+
+    def _load_ir_calibration_file(self):
+        try:
+            if not self._calibration_store_path.is_file():
+                return None
+            with self._calibration_store_path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            if not isinstance(data, dict):
+                logging.warning(
+                    "Arquivo de calibracao IR invalido em %s: conteudo nao e objeto JSON.",
+                    self._calibration_store_path,
+                )
+                return None
+            return data
+        except Exception as exc:
+            logging.warning(
+                "Nao foi possivel ler calibracao IR salva em %s: %s",
+                self._calibration_store_path,
+                exc,
+            )
+            return None
+
+    def _save_ir_calibration_file(self, result):
+        self._calibration_store_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._calibration_store_path.open("w", encoding="utf-8") as fp:
+            json.dump(result, fp, ensure_ascii=False, indent=2, sort_keys=True)
+
+    def _apply_saved_ir_calibration(self):
+        if not self._calibration_last_result:
+            return
+
+        recommendation = self._calibration_last_result.get("recommendation")
+        if not recommendation:
+            return
+
+        self._apply_ir_recommendation(
+            recommendation,
+            override_env=False,
+            source="arquivo de calibracao salvo",
+        )
+
+    def _apply_ir_recommendation(self, recommendation, override_env=True, source="calibracao"):
+        if not recommendation:
+            return False
+
+        def should_apply(env_name):
+            return override_env or env_name not in os.environ
+
+        if should_apply("AGILITY_IR_FREQUENCY") and recommendation.get("frequency_hz"):
+            self.ir_frequency = int(recommendation["frequency_hz"])
+        if should_apply("AGILITY_IR_DUTY_CYCLE") and recommendation.get("duty_cycle") is not None:
+            self.ir_duty_cycle = float(recommendation["duty_cycle"])
+        if should_apply("AGILITY_IR_BURST_ENABLED") and recommendation.get("burst_enabled") is not None:
+            self.ir_burst_enabled = _bool_value(recommendation["burst_enabled"], True)
+        if should_apply("AGILITY_IR_BURST_ON") and recommendation.get("burst_on") is not None:
+            self.ir_burst_on_time = max(0.0005, float(recommendation["burst_on"]))
+        if should_apply("AGILITY_IR_BURST_OFF") and recommendation.get("burst_off") is not None:
+            self.ir_burst_off_time = max(0.0005, float(recommendation["burst_off"]))
+        if (
+            should_apply("AGILITY_SENSOR_ACTIVE_LEVEL")
+            and recommendation.get("sensor_active_level") in ("LOW", "HIGH")
+        ):
+            self.sensor_active_level = recommendation["sensor_active_level"]
+        if (
+            should_apply("AGILITY_SENSOR_SIGNAL_TIMEOUT")
+            and recommendation.get("sensor_signal_timeout") is not None
+        ):
+            self.sensor_signal_timeout = max(
+                self.sensor_poll_interval,
+                float(recommendation["sensor_signal_timeout"]),
+            )
+        if (
+            should_apply("AGILITY_SENSOR_TRIGGER_CONFIRM")
+            and recommendation.get("sensor_trigger_confirm") is not None
+        ):
+            self.sensor_trigger_confirm_time = max(
+                0.0,
+                float(recommendation["sensor_trigger_confirm"]),
+            )
+        if (
+            should_apply("AGILITY_SENSOR_READY_MIN_RATIO")
+            and recommendation.get("sensor_ready_min_ratio") is not None
+        ):
+            self.sensor_ready_min_ratio = max(
+                0.0,
+                min(1.0, float(recommendation["sensor_ready_min_ratio"])),
+            )
+
+        self._ensure_signal_timeout_safe()
+        logging.info(
+            "Configuracao IR aplicada via %s: %sHz, duty %.1f%%, rajada %.4fs/%.4fs, "
+            "nivel ativo %s.",
+            source,
+            self.ir_frequency,
+            self.ir_duty_cycle,
+            self.ir_burst_on_time,
+            self.ir_burst_off_time,
+            self.sensor_active_level,
+        )
+        return True
 
     def _start_sensor_input(self):
         GPIO.setup(self.ir_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
@@ -677,11 +832,20 @@ class Chronometer:
             return
 
         duty_cycle = max(0, min(100, self.ir_duty_cycle))
+        self._using_pigpio_pwm = False
+        self._ir_pwm = None
 
-        if pigpio is not None:
+        if self.ir_pwm_backend in ("auto", "pigpio"):
             try:
+                if pigpio is None:
+                    raise RuntimeError(f"pigpio indisponivel: {PIGPIO_IMPORT_ERROR}")
+                if self.ir_led_pin not in HARDWARE_PWM_PINS:
+                    raise RuntimeError(
+                        f"GPIO{self.ir_led_pin} nao suporta hardware_PWM; use {sorted(HARDWARE_PWM_PINS)}"
+                    )
                 self._pigpio = pigpio.pi()
                 if self._pigpio.connected:
+                    self._pigpio.set_mode(self.ir_led_pin, pigpio.OUTPUT)
                     self._pigpio.hardware_PWM(
                         self.ir_led_pin,
                         self.ir_frequency if not self.ir_burst_enabled else 0,
@@ -704,9 +868,19 @@ class Chronometer:
                     return
 
                 self._pigpio = None
-                logging.warning("pigpio importado, mas daemon pigpiod nao conectado. Usando PWM via RPi.GPIO.")
+                raise RuntimeError("pigpio importado, mas daemon pigpiod nao conectado")
             except Exception as exc:
                 self._pigpio = None
+                if self.ir_pwm_backend == "pigpio":
+                    self._ir_emitter_active = False
+                    self._ir_emitter_mode = "pigpio.hardware_PWM"
+                    self._ir_emitter_error = f"{type(exc).__name__}: {exc}"
+                    logging.error(
+                        "Emissor IR nao inicializado: AGILITY_IR_PWM_BACKEND=pigpio, "
+                        "mas pigpio.hardware_PWM falhou: %s",
+                        exc,
+                    )
+                    return
                 logging.warning("Falha ao iniciar PWM via pigpio: %s. Usando PWM via RPi.GPIO.", exc)
 
         try:
@@ -768,6 +942,70 @@ class Chronometer:
             self._ir_burst_stop.wait(self.ir_burst_off_time)
 
         self._set_ir_carrier_active(False, duty_cycle)
+
+    def _stop_ir_burst_thread(self):
+        if self._ir_burst_thread and self._ir_burst_thread.is_alive():
+            self._ir_burst_stop.set()
+            self._ir_burst_thread.join(timeout=1)
+        self._ir_burst_thread = None
+        self._ir_burst_stop.clear()
+
+    def _stop_ir_emitter(self):
+        self._stop_ir_burst_thread()
+
+        if self._using_pigpio_pwm and self._pigpio is not None:
+            try:
+                self._pigpio.hardware_PWM(self.ir_led_pin, 0, 0)
+            except Exception:
+                logging.exception("Falha ao desligar PWM pigpio do emissor IR.")
+            try:
+                self._pigpio.stop()
+            except Exception:
+                logging.exception("Falha ao encerrar conexao pigpio do emissor IR.")
+
+        if self._ir_pwm is not None:
+            try:
+                self._ir_pwm.stop()
+            except Exception:
+                logging.exception("Falha ao parar PWM RPi.GPIO do emissor IR.")
+
+        if GPIO is not None and self.ir_led_pin:
+            try:
+                GPIO.output(self.ir_led_pin, GPIO.LOW)
+            except Exception:
+                pass
+
+        self._pigpio = None
+        self._using_pigpio_pwm = False
+        self._ir_pwm = None
+        self._ir_emitter_active = False
+
+    def _stop_sensor_input(self):
+        if self._sensor_poll_thread and self._sensor_poll_thread.is_alive():
+            self._sensor_poll_stop.set()
+            self._sensor_poll_thread.join(timeout=1)
+        self._sensor_poll_thread = None
+        self._sensor_poll_stop.clear()
+
+        if GPIO is not None and self._sensor_mode == "event_detect":
+            try:
+                GPIO.remove_event_detect(self.ir_pin)
+            except Exception:
+                pass
+
+        self._sensor_mode = None
+        self._gpio_ready = False
+
+    def _restart_gpio_processing(self):
+        if GPIO is None or not self.ir_pin:
+            return
+        try:
+            self._start_ir_emitter()
+            self._start_sensor_input()
+        except Exception as exc:
+            self._gpio_ready = False
+            self._gpio_error = f"{type(exc).__name__}: {exc}"
+            logging.exception("Falha ao reiniciar GPIO apos calibracao IR.")
 
     def _ir_callback(self, channel, event_time=None):
         trigger_time = event_time if event_time is not None else time.perf_counter()
@@ -869,6 +1107,132 @@ class Chronometer:
         with self._lock:
             if listener not in self._state_change_listeners:
                 self._state_change_listeners.append(listener)
+
+    def _set_calibration_progress(self, update):
+        with self._lock:
+            self._calibration_status.update(
+                {
+                    "phase": update.get("phase", self._calibration_status.get("phase")),
+                    "frequency_hz": update.get(
+                        "frequency_hz",
+                        self._calibration_status.get("frequency_hz"),
+                    ),
+                    "error": None,
+                }
+            )
+            self._mark_state_changed_locked()
+
+    def _mark_calibration_started(self, trigger):
+        now = datetime.now().isoformat()
+        with self._lock:
+            self._calibration_running = True
+            self._calibration_status.update(
+                {
+                    "running": True,
+                    "phase": "starting",
+                    "frequency_hz": None,
+                    "started_at": now,
+                    "finished_at": None,
+                    "trigger": trigger,
+                    "error": None,
+                }
+            )
+            self._mark_state_changed_locked()
+
+    def _mark_calibration_finished(self, result=None, error=None):
+        now = datetime.now().isoformat()
+        with self._lock:
+            self._calibration_running = False
+            self._calibration_status.update(
+                {
+                    "running": False,
+                    "phase": "finished" if error is None else "error",
+                    "frequency_hz": None,
+                    "finished_at": now,
+                    "error": error,
+                }
+            )
+            if result is not None:
+                self._calibration_last_result = result
+                self._calibration_status["last_result"] = result
+            self._mark_state_changed_locked()
+
+    def calibrate_ir_sensor(self, apply=True, save=True, trigger="manual"):
+        if GPIO is None:
+            raise CalibrationError(f"RPi.GPIO indisponivel: {GPIO_IMPORT_ERROR}")
+
+        if not self._calibration_lock.acquire(blocking=False):
+            raise RuntimeError("Calibracao IR ja esta em execucao")
+
+        try:
+            with self._lock:
+                if self._estado in ("autorizado", "rodando"):
+                    raise RuntimeError(
+                        "Calibracao IR bloqueada durante prova autorizada ou em andamento"
+                    )
+
+            self._mark_calibration_started(trigger)
+            logging.info("Iniciando calibracao IR (%s).", trigger)
+
+            try:
+                self._stop_sensor_input()
+                self._stop_ir_emitter()
+                result = run_ir_calibration(
+                    GPIO,
+                    sensor_pin=self.ir_pin,
+                    emitter_pin=self.ir_led_pin,
+                    duty=self.ir_duty_cycle,
+                    duration=IR_CALIBRATION_DURATION_DEFAULT,
+                    interval=self.sensor_poll_interval,
+                    settle=IR_CALIBRATION_SETTLE_DEFAULT,
+                    recovery=IR_CALIBRATION_RECOVERY_DEFAULT,
+                    start=IR_CALIBRATION_START_DEFAULT,
+                    stop=IR_CALIBRATION_STOP_DEFAULT,
+                    step=IR_CALIBRATION_STEP_DEFAULT,
+                    sensitivity_delta=IR_CALIBRATION_SENSITIVITY_DELTA_DEFAULT,
+                    hold_duration=IR_CALIBRATION_HOLD_DEFAULT,
+                    saturation_gap=IR_CALIBRATION_SATURATION_GAP_DEFAULT,
+                    pwm_backend=self.ir_pwm_backend,
+                    progress=self._set_calibration_progress,
+                )
+                recommendation = result.get("recommendation")
+                if apply and recommendation:
+                    self._apply_ir_recommendation(
+                        recommendation,
+                        override_env=True,
+                        source=f"calibracao {trigger}",
+                    )
+                if save:
+                    self._save_ir_calibration_file(result)
+                self._mark_calibration_finished(result=result)
+                logging.info(
+                    "Calibracao IR concluida. Recomendacao: %s",
+                    recommendation,
+                )
+                return self.get_ir_config_status()
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                self._mark_calibration_finished(error=error)
+                logging.exception("Falha durante calibracao IR.")
+                raise
+            finally:
+                self._restart_gpio_processing()
+        finally:
+            self._calibration_lock.release()
+
+    def get_ir_config_status(self):
+        with self._lock:
+            return {
+                "prova_estado": self._estado,
+                "hardware": self.get_hardware_status(),
+                "calibration": copy.deepcopy(self._calibration_status),
+                "saved_calibration": copy.deepcopy(self._calibration_last_result),
+                "electrical_warning": (
+                    "Raspberry Pi GPIO aceita 3.3V. Se o circuito do receptor IR estiver "
+                    "alimentado em 5V, confirme com multimetro/osciloscopio que o sinal no "
+                    "GPIO17 nao passa de 3.3V ou use divisor/level shifter."
+                ),
+            }
 
     def _ignore_sensor_trigger_locked(self, reason, channel=None):
         self._sensor_ignored_count += 1
@@ -1103,11 +1467,14 @@ class Chronometer:
             "pigpio_disponivel": pigpio is not None,
             "pigpio_import_origem": PIGPIO_IMPORT_SOURCE,
             "pigpio_import_erro": PIGPIO_IMPORT_ERROR,
+            "pigpio_conectado": self._pigpio.connected if self._pigpio is not None else False,
             "emissor_habilitado": self.ir_emitter_enabled,
             "emissor_gpio_bcm": self.ir_led_pin,
             "emissor_ativo": self._ir_emitter_active,
             "emissor_modo": self._ir_emitter_mode,
             "emissor_erro": self._ir_emitter_error,
+            "emissor_pwm_backend": self.ir_pwm_backend,
+            "emissor_hardware_pwm_gpio_suportados": sorted(HARDWARE_PWM_PINS),
             "emissor_rajada_habilitada": self.ir_burst_enabled,
             "emissor_rajada_on": self.ir_burst_on_time,
             "emissor_rajada_off": self.ir_burst_off_time,
@@ -1119,6 +1486,8 @@ class Chronometer:
             ),
             "frequencia_hz": self.ir_frequency,
             "duty_cycle": self.ir_duty_cycle,
+            "calibracao_em_execucao": self._calibration_running,
+            "calibracao_status": copy.deepcopy(self._calibration_status),
         }
 
     def get_dados_confirmacao(self):
@@ -1137,20 +1506,8 @@ class Chronometer:
             }
 
     def cleanup(self):
-        if self._sensor_poll_thread and self._sensor_poll_thread.is_alive():
-            self._sensor_poll_stop.set()
-            self._sensor_poll_thread.join(timeout=1)
-
-        if self._ir_burst_thread and self._ir_burst_thread.is_alive():
-            self._ir_burst_stop.set()
-            self._ir_burst_thread.join(timeout=1)
-
-        if self._using_pigpio_pwm and self._pigpio is not None:
-            self._pigpio.hardware_PWM(self.ir_led_pin, 0, 0)
-            self._pigpio.stop()
-
-        if self._ir_pwm is not None:
-            self._ir_pwm.stop()
+        self._stop_sensor_input()
+        self._stop_ir_emitter()
 
         if GPIO:
             pins = list({pin for pin in (self.ir_pin, self.ir_led_pin) if pin})

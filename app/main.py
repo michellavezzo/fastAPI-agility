@@ -2,6 +2,7 @@ from pathlib import Path as FilePath
 from typing import Optional
 
 import asyncio
+import logging
 from fastapi import FastAPI, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -10,7 +11,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import inspect as sa_inspect, text
 
 from . import crud, models, schemas
-from .chrono import Chronometer
+from .chrono import (
+    Chronometer,
+    IR_CALIBRATE_ON_STARTUP_DEFAULT,
+    IR_CALIBRATION_APPLY_DEFAULT,
+    IR_CALIBRATION_SAVE_DEFAULT,
+)
+from .ir_calibration import CalibrationError
 from .database import engine, get_db
 
 models.Base.metadata.create_all(bind=engine)
@@ -138,13 +145,48 @@ def get_chrono():
 @app.on_event("startup")
 async def startup_event():
     ws_manager.bind_loop()
-    get_chrono()
+    chrono = get_chrono()
+    if IR_CALIBRATE_ON_STARTUP_DEFAULT:
+        logging.info("AGILITY_IR_CALIBRATE_ON_STARTUP ativo. Calibrando sensor IR antes de liberar API.")
+        try:
+            chrono.calibrate_ir_sensor(
+                apply=IR_CALIBRATION_APPLY_DEFAULT,
+                save=IR_CALIBRATION_SAVE_DEFAULT,
+                trigger="startup",
+            )
+        except Exception:
+            logging.exception(
+                "Calibracao IR de startup falhou. Backend continuara subindo com status de erro."
+            )
 
 
 @app.get("/hardware/estado")
 def hardware_estado(response: Response):
     response.headers["Cache-Control"] = "no-store"
     return get_chrono().get_hardware_status()
+
+
+@app.get("/config/ir/status")
+def config_ir_status(response: Response):
+    response.headers["Cache-Control"] = "no-store"
+    return get_chrono().get_ir_config_status()
+
+
+@app.post("/config/ir/calibracao")
+def config_ir_calibracao(
+    apply: bool = Query(True),
+    save: bool = Query(True),
+):
+    try:
+        return get_chrono().calibrate_ir_sensor(
+            apply=apply,
+            save=save,
+            trigger="endpoint",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CalibrationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 def _no_store(response: Response):

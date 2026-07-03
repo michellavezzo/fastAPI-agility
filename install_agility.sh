@@ -48,6 +48,7 @@ if ! "$PYTHON_BIN" -m pip install RPi.GPIO; then
 fi
 
 echo "Instalação concluída!"
+echo "Para PWM hardware na Raspberry, garanta: sudo apt install pigpio python3-pigpio && sudo systemctl enable --now pigpiod"
 echo "Use: source $VENV_DIR/bin/activate"
 
 

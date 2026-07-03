@@ -92,6 +92,7 @@ ENV/
 env.bak/
 venv.bak/
 fastapi-env/
+ir_calibration.json
 rasp_scripts/logs/
 rasp_scripts/llog.txt
 

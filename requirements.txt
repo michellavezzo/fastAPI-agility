@@ -5,3 +5,4 @@ pydantic
 db-sqlite3
 requests
 websockets
+pigpio
