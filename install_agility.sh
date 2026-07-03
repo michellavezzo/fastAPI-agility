@@ -1,15 +1,54 @@
 #!/bin/bash
 # Instala dependências do projeto Agility
 
-python3 -m pip install --upgrade pip
+set -euo pipefail
 
-# Instala pacotes do requirements.txt
-pip install -r requirements.txt
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+resolve_python_bin() {
+  local env_dir="$1"
+
+  if [ -x "$SCRIPT_DIR/$env_dir/bin/python" ]; then
+    echo "$SCRIPT_DIR/$env_dir/bin/python"
+  elif [ -x "$SCRIPT_DIR/$env_dir/bin/python3" ]; then
+    echo "$SCRIPT_DIR/$env_dir/bin/python3"
+  else
+    return 1
+  fi
+}
+
+VENV_DIR=""
+PYTHON_BIN=""
+
+if [ -d "venv" ]; then
+  VENV_DIR="venv"
+  PYTHON_BIN="$(resolve_python_bin "$VENV_DIR" || true)"
+fi
+
+if [ -z "$PYTHON_BIN" ] && [ -d "fastapi-env" ]; then
+  VENV_DIR="fastapi-env"
+  PYTHON_BIN="$(resolve_python_bin "$VENV_DIR" || true)"
+fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  VENV_DIR="venv"
+  python3 -m venv "$VENV_DIR"
+  PYTHON_BIN="$(resolve_python_bin "$VENV_DIR")"
+fi
+
+"$PYTHON_BIN" -m pip install --upgrade pip
+
+# Instala pacotes do requirements.txt no mesmo ambiente que executa o backend
+"$PYTHON_BIN" -m pip install -r requirements.txt
 
 # Instala pacote para controle do GPIO na Raspberry Pi
-pip install RPi.GPIO
+if ! "$PYTHON_BIN" -m pip install RPi.GPIO; then
+  echo "Aviso: RPi.GPIO não foi instalado. Em ambientes fora da Raspberry Pi, isso é esperado."
+fi
 
 echo "Instalação concluída!"
+echo "Use: source $VENV_DIR/bin/activate"
 
 
 # Tutorial:

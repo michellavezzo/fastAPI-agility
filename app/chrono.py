@@ -228,6 +228,7 @@ class Chronometer:
         self.debounce_time = max(0.001, float(debounce_time))
         self._lock = threading.RLock()
         self._last_ir_trigger = 0
+        self._state_change_listeners = []
 
         # Estado
         self._estado = "idle"
@@ -845,6 +846,16 @@ class Chronometer:
     def _mark_state_changed_locked(self):
         self._state_version += 1
         self._updated_at = datetime.now().isoformat()
+        for listener in tuple(self._state_change_listeners):
+            try:
+                listener(self._state_version)
+            except Exception:
+                logging.exception("Falha ao notificar alteracao de estado do cronometro.")
+
+    def add_state_change_listener(self, listener):
+        with self._lock:
+            if listener not in self._state_change_listeners:
+                self._state_change_listeners.append(listener)
 
     def _ignore_sensor_trigger_locked(self, reason, channel=None):
         self._sensor_ignored_count += 1

@@ -1,6 +1,7 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 pydantic
 db-sqlite3
 requests
+websockets

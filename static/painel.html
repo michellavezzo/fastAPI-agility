@@ -51,7 +51,6 @@ body{background:#111;color:#eee;font-family:'Segoe UI',Arial,sans-serif;overflow
 </div>
 
 <script>
-const POLL_MS = 100;
 const ESTADO_LABELS = {
   idle: 'Aguardando',
   preparado: 'Preparado',
@@ -62,7 +61,9 @@ const ESTADO_LABELS = {
 
 let lastSnapshot = null;
 let lastSnapshotTime = 0;
-let eventStreamActive = false;
+let ws = null;
+let reconnectTimer = null;
+let reconnectDelay = 500;
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
@@ -118,28 +119,34 @@ function renderFrame() {
   requestAnimationFrame(renderFrame);
 }
 
-async function poll() {
-  try {
-    const r = await fetch('/prova-ativa/estado', {cache: 'no-store'});
-    if (r.ok) {
-      setSnapshot(await r.json());
-    }
-  } catch (_) {}
-  setTimeout(poll, POLL_MS);
+function wsUrl(path) {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}${path}`;
 }
 
-function connectEvents() {
-  if (!window.EventSource) return;
-  const es = new EventSource('/prova-ativa/events');
-  es.onopen = () => { eventStreamActive = true; };
-  es.onerror = () => { eventStreamActive = false; };
-  es.addEventListener('estado', ev => setSnapshot(JSON.parse(ev.data)));
-  es.onmessage = ev => setSnapshot(JSON.parse(ev.data));
+function connectWebSocket() {
+  if (ws) ws.close();
+  ws = new WebSocket(wsUrl('/ws/prova-ativa'));
+  ws.onopen = () => {
+    reconnectDelay = 500;
+    clearTimeout(reconnectTimer);
+  };
+  ws.onmessage = ev => {
+    const message = JSON.parse(ev.data);
+    if (message.tipo === 'estado') setSnapshot(message.data);
+  };
+  ws.onclose = scheduleReconnect;
+  ws.onerror = () => ws.close();
+}
+
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectWebSocket, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 5000);
 }
 
 requestAnimationFrame(renderFrame);
-connectEvents();
-poll();
+connectWebSocket();
 </script>
 </body>
 </html>

@@ -111,11 +111,12 @@ button:disabled{opacity:.3;cursor:not-allowed}
 </div>
 
 <script>
-const POLL_MS = 100;
 const ESTADO_LABELS = {idle:'Aguardando',preparado:'Preparado',autorizado:'Autorizado',rodando:'Em Prova',finalizado:'Finalizado'};
 let lastSnapshot = null;
 let lastSnapshotTime = 0;
-let eventStreamActive = false;
+let ws = null;
+let reconnectTimer = null;
+let reconnectDelay = 500;
 
 function formatTime(s){const m=Math.floor(s/60);const sec=Math.floor(s%60);const ms=Math.floor((s-Math.floor(s))*1000);return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;}
 function interpolate(base,at){if(!base)return{tia:'00:00.000',top:'00:00.000'};const el=(performance.now()-at)/1000;let tia=base.tia_decorrido,top=base.top_decorrido;if(base.estado==='autorizado')tia+=el;if(base.estado==='rodando')top+=el;return{tia:formatTime(tia),top:formatTime(top)};}
@@ -193,21 +194,30 @@ function renderFrame(){
   requestAnimationFrame(renderFrame);
 }
 
-async function poll(){
-  try{
-    const r=await fetch('/prova-ativa/estado',{cache:'no-store'});
-    if(r.ok) setSnapshot(await r.json());
-  }catch(_){}
-  setTimeout(poll,POLL_MS);
+function wsUrl(path){
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${protocol}//${location.host}${path}`;
 }
 
-function connectEvents(){
-  if(!window.EventSource)return;
-  const es = new EventSource('/prova-ativa/events');
-  es.onopen = ()=>{eventStreamActive=true;};
-  es.onerror = ()=>{eventStreamActive=false;};
-  es.addEventListener('estado', ev=>setSnapshot(JSON.parse(ev.data)));
-  es.onmessage = ev=>setSnapshot(JSON.parse(ev.data));
+function connectWebSocket(){
+  if(ws) ws.close();
+  ws = new WebSocket(wsUrl('/ws/prova-ativa'));
+  ws.onopen = ()=>{
+    reconnectDelay = 500;
+    clearTimeout(reconnectTimer);
+  };
+  ws.onmessage = ev=>{
+    const message = JSON.parse(ev.data);
+    if(message.tipo === 'estado') setSnapshot(message.data);
+  };
+  ws.onclose = scheduleReconnect;
+  ws.onerror = ()=>ws.close();
+}
+
+function scheduleReconnect(){
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(connectWebSocket, reconnectDelay);
+  reconnectDelay = Math.min(reconnectDelay * 2, 5000);
 }
 
 $('btnPreparar').onclick = async()=>{
@@ -231,8 +241,7 @@ $('btnRecusaMinus').onclick = ()=>postJson('/prova-ativa/desfazer-recusa');
 
 requestAnimationFrame(renderFrame);
 loadInscricoes();
-connectEvents();
-poll();
+connectWebSocket();
 </script>
 </body>
 </html>

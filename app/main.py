@@ -1,11 +1,10 @@
-import asyncio
-import json
 from pathlib import Path as FilePath
 from typing import Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Response
+import asyncio
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 
 from sqlalchemy import inspect as sa_inspect, text
@@ -63,15 +62,82 @@ _chrono = None
 STATIC_DIR = FilePath(__file__).resolve().parent.parent / "static"
 
 
+class ProvaAtivaWebSocketManager:
+    def __init__(self):
+        self._connections = set()
+        self._lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._loop = None
+        self._broadcast_pending = False
+
+    def bind_loop(self):
+        self._loop = asyncio.get_running_loop()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        async with self._lock:
+            self._connections.add(websocket)
+        await self._send_state(websocket)
+
+    async def disconnect(self, websocket: WebSocket):
+        async with self._lock:
+            self._connections.discard(websocket)
+
+    def schedule_state_broadcast(self, *_):
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._ensure_broadcast_task)
+
+    def _ensure_broadcast_task(self):
+        if self._broadcast_pending:
+            return
+        self._broadcast_pending = True
+        asyncio.create_task(self.broadcast_state())
+
+    async def _send_state(self, websocket: WebSocket):
+        async with self._send_lock:
+            await websocket.send_json({
+                "tipo": "estado",
+                "data": get_chrono().get_estado_completo(),
+            })
+
+    async def broadcast_state(self):
+        self._broadcast_pending = False
+        payload = {
+            "tipo": "estado",
+            "data": get_chrono().get_estado_completo(),
+        }
+        async with self._lock:
+            connections = tuple(self._connections)
+
+        stale_connections = []
+        async with self._send_lock:
+            for websocket in connections:
+                try:
+                    await websocket.send_json(payload)
+                except Exception:
+                    stale_connections.append(websocket)
+
+        if stale_connections:
+            async with self._lock:
+                for websocket in stale_connections:
+                    self._connections.discard(websocket)
+
+
+ws_manager = ProvaAtivaWebSocketManager()
+
+
 def get_chrono():
     global _chrono
     if _chrono is None:
         _chrono = Chronometer()
+        _chrono.add_state_change_listener(ws_manager.schedule_state_broadcast)
     return _chrono
 
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
+    ws_manager.bind_loop()
     get_chrono()
 
 
@@ -87,33 +153,14 @@ def _no_store(response: Response):
     response.headers["Expires"] = "0"
 
 
-@app.get("/prova-ativa/events")
-async def prova_ativa_events():
-    async def event_stream():
-        last_version = None
-        last_heartbeat = 0
+@app.websocket("/ws/prova-ativa")
+async def websocket_prova_ativa(websocket: WebSocket):
+    await ws_manager.connect(websocket)
+    try:
         while True:
-            state = get_chrono().get_estado_completo()
-            version = state.get("versao")
-            if version != last_version:
-                last_version = version
-                payload = json.dumps(state, ensure_ascii=False)
-                yield f"event: estado\ndata: {payload}\n\n"
-
-            now = asyncio.get_running_loop().time()
-            if now - last_heartbeat >= 15:
-                last_heartbeat = now
-                yield ": keepalive\n\n"
-            await asyncio.sleep(0.05)
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-store",
-            "X-Accel-Buffering": "no",
-        },
-    )
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await ws_manager.disconnect(websocket)
 
 #  Usuários
 
