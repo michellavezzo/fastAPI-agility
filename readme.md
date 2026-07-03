@@ -35,6 +35,12 @@ uvicorn app.main:app --reload
 python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Na Raspberry Pi com GPIO, rode sem `--reload` para evitar inicialização duplicada do hardware:
+
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
 # Rodar Comandos SQL terminal
 
 sqlite3 agility.db
@@ -51,6 +57,29 @@ Na Raspberry Pi, instale primeiro o pacote de GPIO do sistema:
 sudo apt update
 sudo apt install python3-rpi.gpio
 ```
+
+Configuração recomendada para o circuito IR inspirado no tutorial:
+
+```bash
+export AGILITY_IR_FREQUENCY=31000
+export AGILITY_IR_BURST_ENABLED=1
+export AGILITY_IR_BURST_ON=0.002
+export AGILITY_IR_BURST_OFF=0.002
+export AGILITY_SENSOR_READ_MODE=auto
+export AGILITY_SENSOR_POLL_INTERVAL=0.001
+export AGILITY_SENSOR_ACTIVE_LEVEL=LOW
+export AGILITY_SENSOR_REARM_STABLE=0.02
+export AGILITY_SENSOR_TRIGGER_CONFIRM=0.002
+export AGILITY_SENSOR_SIGNAL_TIMEOUT=0.03
+export AGILITY_SENSOR_READY_CONFIRM=0.05
+export AGILITY_SENSOR_READY_MIN_RATIO=0.2
+export AGILITY_SENSOR_REQUIRE_READY=1
+```
+
+`AGILITY_SENSOR_READ_MODE=auto` tenta interrupção por borda primeiro. Se a interrupção GPIO falhar, o backend cai para polling rápido.
+No teste do sensor atual, o receptor respondeu melhor em `31000Hz`: feixe alinhado deixa o GPIO em `HIGH`, e feixe quebrado/sem sinal deixa em `LOW`. Por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`.
+Como esse tipo de receptor pode bloquear portadora contínua, o emissor usa rajadas: 2 ms ligado e 2 ms desligado. O backend considera o feixe alinhado enquanto enxerga pulsos recentes, controlado por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
+Na autorização da largada, o backend amostra o GPIO por `AGILITY_SENSOR_READY_CONFIRM` segundos e aceita se pelo menos `AGILITY_SENSOR_READY_MIN_RATIO` das leituras indicarem feixe alinhado.
 
 - Dê permissão de execução com
 

@@ -91,6 +91,9 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+fastapi-env/
+rasp_scripts/logs/
+rasp_scripts/llog.txt
 
 # Spyder project settings
 .spyderproject
