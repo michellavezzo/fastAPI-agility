@@ -55,9 +55,15 @@ Na Raspberry Pi, instale primeiro o pacote de GPIO do sistema:
 
 ```bash
 sudo apt update
-sudo apt install python3-rpi.gpio pigpio python3-pigpio
-sudo systemctl enable --now pigpiod
+sudo apt install python3-rpi.gpio python3-pigpio
 ```
+
+O backend tenta usar `pigpio.hardware_PWM` quando o daemon `pigpiod` esta
+disponivel. Em algumas imagens Debian/Raspberry Pi OS, o APT fornece
+`python3-pigpio`, mas nao fornece o pacote servidor `pigpio/pigpiod`; nesse
+caso `AGILITY_IR_PWM_BACKEND=auto` cai automaticamente para `RPi.GPIO.PWM`.
+Use `AGILITY_IR_PWM_BACKEND=pigpio` apenas quando `pigpiod` estiver instalado e
+ativo.
 
 Configuração recomendada para o circuito IR. Ajuste `AGILITY_IR_FREQUENCY` com o resultado de `rasp_scripts/testar_sensor_ir.py`:
 
@@ -66,13 +72,13 @@ export AGILITY_IR_FREQUENCY=56000
 export AGILITY_IR_PWM_BACKEND=auto
 export AGILITY_IR_BURST_ENABLED=1
 export AGILITY_IR_BURST_ON=0.002
-export AGILITY_IR_BURST_OFF=0.002
+export AGILITY_IR_BURST_OFF=0.018
 export AGILITY_SENSOR_READ_MODE=auto
 export AGILITY_SENSOR_POLL_INTERVAL=0.001
 export AGILITY_SENSOR_ACTIVE_LEVEL=LOW
 export AGILITY_SENSOR_REARM_STABLE=0.02
 export AGILITY_SENSOR_TRIGGER_CONFIRM=0.002
-export AGILITY_SENSOR_SIGNAL_TIMEOUT=0.03
+export AGILITY_SENSOR_SIGNAL_TIMEOUT=0.06
 export AGILITY_SENSOR_READY_CONFIRM=0.05
 export AGILITY_SENSOR_READY_MIN_RATIO=0.2
 export AGILITY_SENSOR_REQUIRE_READY=1
@@ -88,7 +94,7 @@ export AGILITY_IR_CALIBRATION_SAVE=1
 
 `AGILITY_SENSOR_READ_MODE=auto` tenta interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para que as rajadas não gerem falsos eventos.
 No circuito com LED indicador, o LED costuma ficar ligado sem sinal e apagar quando o receptor detecta IR. Nessa montagem, o feixe alinhado normalmente deixa o GPIO em `HIGH`, e o feixe quebrado/sem sinal deixa em `LOW`. Por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`.
-Como esse tipo de receptor pode bloquear portadora contínua, o emissor usa rajadas: 2 ms ligado e 2 ms desligado. O backend considera o feixe alinhado enquanto enxerga pulsos recentes, controlado por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
+Como esse tipo de receptor pode bloquear portadora continua, o emissor usa rajadas com baixa ocupacao de envelope: 2 ms ligado e 18 ms desligado. O backend considera o feixe alinhado enquanto enxerga pulsos recentes, controlado por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
 Na autorização da largada, o backend amostra o GPIO por `AGILITY_SENSOR_READY_CONFIRM` segundos e aceita se pelo menos `AGILITY_SENSOR_READY_MIN_RATIO` das leituras indicarem feixe alinhado.
 
 Para calibrar, pare o backend na Raspberry e rode:

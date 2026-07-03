@@ -48,7 +48,8 @@ if ! "$PYTHON_BIN" -m pip install RPi.GPIO; then
 fi
 
 echo "Instalação concluída!"
-echo "Para PWM hardware na Raspberry, garanta: sudo apt install pigpio python3-pigpio && sudo systemctl enable --now pigpiod"
+echo "Para PWM hardware via pigpio, o daemon pigpiod precisa existir e estar ativo."
+echo "Se a imagem Debian/Raspberry Pi OS nao fornecer pigpiod, use AGILITY_IR_PWM_BACKEND=auto para fallback em RPi.GPIO.PWM."
 echo "Use: source $VENV_DIR/bin/activate"
 
 

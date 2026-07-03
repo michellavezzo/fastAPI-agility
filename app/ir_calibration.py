@@ -323,14 +323,14 @@ def choose_recommendation(sensitive, hold_results):
 
 def recommended_burst_times(hold_stats):
     default_on = 0.002
-    default_off = 0.002
+    default_off = 0.018
     if not hold_stats or hold_stats["lost_after"] is None:
         return default_on, default_off
     if hold_stats["lost_after"] <= 0:
-        return 0.0005, default_off
+        return 0.001, default_off
 
-    burst_on = max(0.0005, min(default_on, hold_stats["lost_after"] / 4))
-    burst_off = max(default_off, burst_on)
+    burst_on = max(0.001, min(default_on, hold_stats["lost_after"] / 8))
+    burst_off = max(default_off, burst_on * 9)
     return burst_on, burst_off
 
 
@@ -348,7 +348,7 @@ def build_recommendation(GPIO, duty, baseline, sensitive, hold_results):
         None,
     )
     burst_on, burst_off = recommended_burst_times(matching_hold)
-    signal_timeout = max(0.03, (burst_on + burst_off) * 6)
+    signal_timeout = max(0.06, (burst_on + burst_off) * 3)
     baseline_signal_pct = level_pct(GPIO, baseline, signal_level)
 
     return {
