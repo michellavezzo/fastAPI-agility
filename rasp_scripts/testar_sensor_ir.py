@@ -136,6 +136,8 @@ def main():
             freqs=args.freqs,
             skip_hold=args.skip_hold,
             pwm_backend=args.pwm_backend,
+            pwm_chip=args.pwm_chip,
+            pwm_channel=args.pwm_channel,
         )
     except CalibrationError as exc:
         print(f"ERRO: {exc}")

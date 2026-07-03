@@ -58,18 +58,29 @@ sudo apt update
 sudo apt install python3-rpi.gpio python3-pigpio
 ```
 
-O backend tenta usar `pigpio.hardware_PWM` quando o daemon `pigpiod` esta
-disponivel. Em algumas imagens Debian/Raspberry Pi OS, o APT fornece
-`python3-pigpio`, mas nao fornece o pacote servidor `pigpio/pigpiod`; nesse
-caso `AGILITY_IR_PWM_BACKEND=auto` cai automaticamente para `RPi.GPIO.PWM`.
-Use `AGILITY_IR_PWM_BACKEND=pigpio` apenas quando `pigpiod` estiver instalado e
-ativo.
+O caminho recomendado para PWM por hardware e o PWM do kernel via
+`/sys/class/pwm`, habilitado com `dtoverlay=pwm-2chan`. Para configurar:
+
+```bash
+chmod +x rasp_scripts/configurar_pwm_hardware.sh
+./rasp_scripts/configurar_pwm_hardware.sh
+sudo reboot
+```
+
+Depois do reboot, `AGILITY_IR_PWM_BACKEND=auto` tenta `kernel_pwm` primeiro,
+depois `pigpio.hardware_PWM` e por ultimo `RPi.GPIO.PWM`. Use
+`AGILITY_IR_PWM_BACKEND=kernel_pwm` para exigir PWM por hardware do kernel.
+Em algumas imagens Debian/Raspberry Pi OS, o APT fornece `python3-pigpio`, mas
+nao fornece o daemon `pigpiod`; nesse caso o backend nao depende mais dele para
+PWM por hardware.
 
 Configuração recomendada para o circuito IR. Ajuste `AGILITY_IR_FREQUENCY` com o resultado de `rasp_scripts/testar_sensor_ir.py`:
 
 ```bash
 export AGILITY_IR_FREQUENCY=56000
 export AGILITY_IR_PWM_BACKEND=auto
+export AGILITY_IR_PWM_CHIP=0
+export AGILITY_IR_PWM_CHANNEL=0
 export AGILITY_IR_BURST_ENABLED=1
 export AGILITY_IR_BURST_ON=0.002
 export AGILITY_IR_BURST_OFF=0.018
@@ -100,7 +111,7 @@ Na autorização da largada, o backend amostra o GPIO por `AGILITY_SENSOR_READY_
 Para calibrar, pare o backend na Raspberry e rode:
 
 ```bash
-python rasp_scripts/testar_sensor_ir.py --pwm-backend pigpio
+python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm
 ```
 
 O script varre de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões, mantém a portadora contínua por 1 segundo nas frequências sensíveis e imprime os `export AGILITY_*` recomendados. A mesma calibração também pode ser executada na tela `/config`.

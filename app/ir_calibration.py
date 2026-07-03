@@ -3,6 +3,7 @@ import json
 import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 
 SYSTEM_DIST_PACKAGES = (
@@ -11,6 +12,12 @@ SYSTEM_DIST_PACKAGES = (
 )
 
 HARDWARE_PWM_PINS = {12, 13, 18, 19}
+KERNEL_PWM_CHANNEL_BY_PIN = {
+    12: 0,
+    13: 1,
+    18: 0,
+    19: 1,
+}
 
 
 class CalibrationError(RuntimeError):
@@ -62,9 +69,104 @@ def normalize_pwm_backend(backend):
     value = str(backend or "auto").strip().lower()
     if value in ("rpi", "rpi.gpio", "gpio", "software"):
         return "rpi_gpio"
-    if value not in ("auto", "pigpio", "rpi_gpio"):
+    if value in ("kernel", "linux", "sysfs", "hardware", "hardware_pwm"):
+        return "kernel_pwm"
+    if value not in ("auto", "kernel_pwm", "pigpio", "rpi_gpio"):
         return "auto"
     return value
+
+
+def kernel_pwm_channel_for_pin(pin, channel=None):
+    if channel is not None:
+        return int(channel)
+    pin = int(pin)
+    if pin not in KERNEL_PWM_CHANNEL_BY_PIN:
+        raise CalibrationError(
+            f"GPIO{pin} nao tem canal PWM do kernel mapeado automaticamente; "
+            "use GPIO18/GPIO19 ou configure AGILITY_IR_PWM_CHANNEL."
+        )
+    return KERNEL_PWM_CHANNEL_BY_PIN[pin]
+
+
+class KernelSysfsPWM:
+    def __init__(self, pin, chip=0, channel=None):
+        self.pin = int(pin)
+        self.chip = int(chip)
+        self.channel = kernel_pwm_channel_for_pin(self.pin, channel)
+        self.chip_path = Path("/sys/class/pwm") / f"pwmchip{self.chip}"
+        self.pwm_path = self.chip_path / f"pwm{self.channel}"
+        self.frequency = None
+        self.duty_cycle = 0.0
+        self.enabled = False
+
+    def setup(self):
+        if not self.chip_path.is_dir():
+            raise CalibrationError(
+                f"PWM do kernel indisponivel em {self.chip_path}. "
+                "Habilite dtoverlay=pwm-2chan em /boot/firmware/config.txt e reinicie."
+            )
+
+        if not self.pwm_path.is_dir():
+            self._write(self.chip_path / "export", self.channel)
+            self._wait_ready()
+        else:
+            self._wait_ready()
+
+        self.off()
+
+    def start(self, frequency, duty_cycle):
+        frequency = int(frequency)
+        duty_cycle = max(0.0, min(100.0, float(duty_cycle)))
+
+        if self.frequency != frequency:
+            period_ns = self._period_ns(frequency)
+            self._write(self.pwm_path / "duty_cycle", 0)
+            self._write(self.pwm_path / "period", period_ns)
+            self.frequency = frequency
+
+        duty_ns = int(self._period_ns(frequency) * duty_cycle / 100)
+        self._write(self.pwm_path / "duty_cycle", duty_ns)
+        self._write(self.pwm_path / "enable", 1)
+        self.duty_cycle = duty_cycle
+        self.enabled = True
+
+    def off(self):
+        if not self.pwm_path.is_dir():
+            return
+        self._write(self.pwm_path / "duty_cycle", 0)
+        self._write(self.pwm_path / "enable", 0)
+        self.duty_cycle = 0.0
+        self.enabled = False
+
+    def cleanup(self):
+        self.off()
+
+    @staticmethod
+    def _period_ns(frequency):
+        if frequency <= 0:
+            raise CalibrationError("frequencia PWM do kernel precisa ser maior que zero")
+        return int(1_000_000_000 / frequency)
+
+    def _wait_ready(self, timeout=2.0):
+        deadline = time.perf_counter() + timeout
+        required = ("period", "duty_cycle", "enable")
+        while time.perf_counter() < deadline:
+            if self.pwm_path.is_dir() and all((self.pwm_path / name).exists() for name in required):
+                return
+            time.sleep(0.01)
+        raise CalibrationError(f"PWM do kernel nao ficou pronto em {self.pwm_path}")
+
+    @staticmethod
+    def _write(path, value):
+        try:
+            with Path(path).open("w", encoding="ascii") as fp:
+                fp.write(f"{value}\n")
+        except PermissionError as exc:
+            raise CalibrationError(
+                f"sem permissao para escrever em {path}; execute como root ou ajuste permissoes do pwmchip"
+            ) from exc
+        except OSError as exc:
+            raise CalibrationError(f"falha ao escrever {value!r} em {path}: {exc}") from exc
 
 
 def level_name(GPIO, level):
@@ -130,17 +232,31 @@ def read_window(GPIO, sensor_pin, duration, interval):
 
 
 class Emitter:
-    def __init__(self, GPIO, pin, duty, pwm_backend="auto"):
+    def __init__(self, GPIO, pin, duty, pwm_backend="auto", pwm_chip=0, pwm_channel=None):
         self.GPIO = GPIO
         self.pin = int(pin)
         self.duty = max(0.0, min(100.0, float(duty)))
         self.pwm_backend = normalize_pwm_backend(pwm_backend)
+        self.pwm_chip = int(pwm_chip)
+        self.pwm_channel = pwm_channel
         self.active_backend = None
         self.pwm = None
+        self.kernel_pwm = None
         self.pigpio = None
         self.pi = None
 
     def setup(self):
+        if self.pwm_backend in ("auto", "kernel_pwm"):
+            try:
+                self._setup_kernel_pwm()
+                return
+            except CalibrationError:
+                if self.pwm_backend == "kernel_pwm":
+                    raise
+            except Exception as exc:
+                if self.pwm_backend == "kernel_pwm":
+                    raise CalibrationError(f"falha ao iniciar PWM do kernel: {exc}") from exc
+
         if self.pwm_backend in ("auto", "pigpio"):
             try:
                 self._setup_pigpio()
@@ -156,6 +272,20 @@ class Emitter:
         self.pwm = self.GPIO.PWM(self.pin, 38000)
         self.pwm.start(0)
         self.active_backend = "RPi.GPIO.PWM"
+
+    def _setup_kernel_pwm(self):
+        if self.pin not in HARDWARE_PWM_PINS:
+            raise CalibrationError(
+                f"GPIO{self.pin} nao suporta PWM de hardware; use {sorted(HARDWARE_PWM_PINS)}"
+            )
+
+        self.kernel_pwm = KernelSysfsPWM(
+            self.pin,
+            chip=self.pwm_chip,
+            channel=self.pwm_channel,
+        )
+        self.kernel_pwm.setup()
+        self.active_backend = "kernel.sysfs.PWM"
 
     def _setup_pigpio(self):
         if self.pin not in HARDWARE_PWM_PINS:
@@ -175,6 +305,9 @@ class Emitter:
 
     def set_frequency(self, frequency):
         frequency = int(frequency)
+        if self.kernel_pwm is not None:
+            self.kernel_pwm.start(frequency, self.duty)
+            return
         if self.pi is not None:
             self.pi.hardware_PWM(self.pin, frequency, int(self.duty * 10000))
             return
@@ -183,6 +316,9 @@ class Emitter:
         self.pwm.ChangeDutyCycle(self.duty)
 
     def off(self):
+        if self.kernel_pwm is not None:
+            self.kernel_pwm.off()
+            return
         if self.pi is not None:
             self.pi.hardware_PWM(self.pin, 0, 0)
             return
@@ -197,6 +333,9 @@ class Emitter:
             if self.pwm is not None:
                 self.pwm.stop()
                 self.pwm = None
+            if self.kernel_pwm is not None:
+                self.kernel_pwm.cleanup()
+                self.kernel_pwm = None
             if self.pi is not None:
                 self.pi.stop()
                 self.pi = None
@@ -375,9 +514,13 @@ def build_recommendation(GPIO, duty, baseline, sensitive, hold_results):
 def format_export_lines(recommendation):
     if not recommendation:
         return []
-    return [
+    lines = [
         f"export AGILITY_IR_FREQUENCY={recommendation['frequency_hz']}",
         f"export AGILITY_IR_DUTY_CYCLE={recommendation['duty_cycle']:g}",
+    ]
+    if recommendation.get("pwm_backend_env"):
+        lines.append(f"export AGILITY_IR_PWM_BACKEND={recommendation['pwm_backend_env']}")
+    lines.extend([
         "export AGILITY_IR_BURST_ENABLED=1",
         f"export AGILITY_IR_BURST_ON={recommendation['burst_on']:.4f}",
         f"export AGILITY_IR_BURST_OFF={recommendation['burst_off']:.4f}",
@@ -385,7 +528,18 @@ def format_export_lines(recommendation):
         f"export AGILITY_SENSOR_SIGNAL_TIMEOUT={recommendation['sensor_signal_timeout']:.3f}",
         f"export AGILITY_SENSOR_TRIGGER_CONFIRM={recommendation['sensor_trigger_confirm']:.3f}",
         f"export AGILITY_SENSOR_READY_MIN_RATIO={recommendation['sensor_ready_min_ratio']:.1f}",
-    ]
+    ])
+    return lines
+
+
+def backend_env_name(active_backend):
+    if active_backend == "kernel.sysfs.PWM":
+        return "kernel_pwm"
+    if active_backend == "pigpio.hardware_PWM":
+        return "pigpio"
+    if active_backend == "RPi.GPIO.PWM":
+        return "rpi_gpio"
+    return None
 
 
 def run_ir_calibration(
@@ -406,6 +560,8 @@ def run_ir_calibration(
     freqs=None,
     skip_hold=False,
     pwm_backend="auto",
+    pwm_chip=0,
+    pwm_channel=None,
     progress=None,
 ):
     if GPIO is None:
@@ -417,7 +573,14 @@ def run_ir_calibration(
     GPIO.setmode(GPIO.BCM)
     GPIO.setup(sensor_pin, GPIO.IN, pull_up_down=GPIO.PUD_UP)
 
-    emitter = Emitter(GPIO, emitter_pin, duty, pwm_backend=pwm_backend)
+    emitter = Emitter(
+        GPIO,
+        emitter_pin,
+        duty,
+        pwm_backend=pwm_backend,
+        pwm_chip=pwm_chip,
+        pwm_channel=pwm_channel,
+    )
     emitter.setup()
 
     options = {
@@ -436,6 +599,8 @@ def run_ir_calibration(
         "saturation_gap": float(saturation_gap),
         "skip_hold": bool(skip_hold),
         "pwm_backend_requested": normalize_pwm_backend(pwm_backend),
+        "pwm_chip": int(pwm_chip),
+        "pwm_channel": kernel_pwm_channel_for_pin(emitter_pin, pwm_channel),
         "frequencies": frequency_list(start, stop, step, freqs),
     }
 
@@ -483,6 +648,7 @@ def run_ir_calibration(
         recommendation = build_recommendation(GPIO, duty, baseline, sensitive, hold_results)
         if recommendation is not None:
             recommendation["pwm_backend"] = emitter.active_backend
+            recommendation["pwm_backend_env"] = backend_env_name(emitter.active_backend)
             recommendation["exports"] = format_export_lines(recommendation)
 
         scan_results = [
@@ -564,8 +730,19 @@ def build_arg_parser():
     parser.add_argument(
         "--pwm-backend",
         default="auto",
-        choices=("auto", "pigpio", "rpi_gpio"),
+        choices=("auto", "kernel_pwm", "sysfs", "pigpio", "rpi_gpio"),
         help="Backend de PWM para o emissor.",
+    )
+    parser.add_argument(
+        "--pwm-chip",
+        type=int,
+        default=0,
+        help="Numero do pwmchip do kernel. Para Raspberry Pi Zero 2 W normalmente e 0.",
+    )
+    parser.add_argument(
+        "--pwm-channel",
+        type=int,
+        help="Canal PWM do kernel. Com dtoverlay=pwm-2chan, GPIO18 normalmente usa canal 0.",
     )
     parser.add_argument(
         "--json",

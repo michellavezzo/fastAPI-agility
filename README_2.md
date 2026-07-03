@@ -90,8 +90,8 @@ Observações:
 - Na Raspberry Pi com GPIO, rode o backend sem `--reload`; o reload cria processo supervisor e pode inicializar hardware mais de uma vez durante desenvolvimento.
 - Se aparecer `No module named sqlalchemy` ou `No module named uvicorn`, rode novamente `rasp_scripts/instalar_dependencias.sh`.
 - Na Raspberry Pi, o script tenta instalar `RPi.GPIO`; se isso falhar, o backend ainda pode rodar em modo sem GPIO.
-- Para PWM por hardware no emissor IR, o backend usa `pigpio.hardware_PWM` em `GPIO18` quando o daemon `pigpiod` estiver disponível. Em algumas imagens Debian/Raspberry Pi OS, o APT fornece `python3-pigpio`, mas não fornece o pacote servidor `pigpio/pigpiod`; nesses casos use `AGILITY_IR_PWM_BACKEND=auto` para cair automaticamente em `RPi.GPIO.PWM`.
-- Com `AGILITY_IR_PWM_BACKEND=pigpio`, falha de `pigpiod` deixa o emissor em erro explícito. Com `AGILITY_IR_PWM_BACKEND=auto`, o backend tenta `pigpio.hardware_PWM` e cai para `RPi.GPIO.PWM` se necessário.
+- Para PWM por hardware no emissor IR, o caminho recomendado é o PWM do kernel via `/sys/class/pwm`, habilitado com `dtoverlay=pwm-2chan`. Rode `rasp_scripts/configurar_pwm_hardware.sh` na Raspberry e reinicie. Com `GPIO18`, o overlay padrão usa `pwmchip0/pwm0`.
+- Com `AGILITY_IR_PWM_BACKEND=kernel_pwm`, falha do overlay/permissão deixa o emissor em erro explícito. Com `AGILITY_IR_PWM_BACKEND=auto`, o backend tenta `kernel_pwm`, depois `pigpio.hardware_PWM` e por último `RPi.GPIO.PWM`.
 
 ## Raspberry Pi: sensor IR e LED IR
 
@@ -132,6 +132,8 @@ export AGILITY_IR_LED_PIN=18
 export AGILITY_IR_FREQUENCY=56000
 export AGILITY_IR_DUTY_CYCLE=50
 export AGILITY_IR_PWM_BACKEND=auto
+export AGILITY_IR_PWM_CHIP=0
+export AGILITY_IR_PWM_CHANNEL=0
 export AGILITY_IR_EMITTER_ENABLED=1
 export AGILITY_IR_BURST_ENABLED=1
 export AGILITY_IR_BURST_ON=0.002
@@ -176,7 +178,7 @@ Para evitar bloqueio por uma queda curta do receptor, a autorização não usa a
 Para sensor desconhecido, pare o backend e rode:
 
 ```bash
-python rasp_scripts/testar_sensor_ir.py --pwm-backend pigpio
+python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm
 ```
 
 O script mede o GPIO com o emissor desligado, varre frequências de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões e, nas frequências sensíveis, mantém a portadora contínua por 1 segundo para estimar se/quando o sensor satura. Ao final ele imprime os `export AGILITY_*` recomendados para o backend. Use esses valores depois de reiniciar o serviço.

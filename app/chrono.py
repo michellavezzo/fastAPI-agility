@@ -13,6 +13,8 @@ from pathlib import Path
 from .ir_calibration import (
     CalibrationError,
     HARDWARE_PWM_PINS,
+    KernelSysfsPWM,
+    kernel_pwm_channel_for_pin,
     normalize_pwm_backend,
     run_ir_calibration,
 )
@@ -91,7 +93,7 @@ if GPIO is None:
         logging.warning(
             "Na Raspberry Pi, instale os pacotes no sistema ou recrie a venv com acesso a eles: "
             "sudo apt install python3-rpi.gpio. "
-            "O pigpio e opcional; se nao existir no APT desta imagem, o emissor IR usa RPi.GPIO.PWM."
+            "Para PWM por hardware sem pigpiod, habilite dtoverlay=pwm-2chan e use kernel_pwm."
         )
 else:
     logging.info("RPi.GPIO carregado via %s.", GPIO_IMPORT_SOURCE)
@@ -113,6 +115,9 @@ IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
 IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
 IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.018"))
 IR_PWM_BACKEND_DEFAULT = os.environ.get("AGILITY_IR_PWM_BACKEND", "auto").strip().lower()
+IR_PWM_CHIP_DEFAULT = int(os.environ.get("AGILITY_IR_PWM_CHIP", "0"))
+IR_PWM_CHANNEL_ENV = os.environ.get("AGILITY_IR_PWM_CHANNEL")
+IR_PWM_CHANNEL_DEFAULT = int(IR_PWM_CHANNEL_ENV) if IR_PWM_CHANNEL_ENV not in (None, "") else None
 SENSOR_DEBOUNCE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_DEBOUNCE", "1.0"))
 SENSOR_REARM_STABLE_DEFAULT = float(os.environ.get("AGILITY_SENSOR_REARM_STABLE", "0.02"))
 SENSOR_POLL_INTERVAL_DEFAULT = float(os.environ.get("AGILITY_SENSOR_POLL_INTERVAL", "0.001"))
@@ -174,6 +179,8 @@ class Chronometer:
         ir_frequency=IR_FREQUENCY_DEFAULT,
         ir_duty_cycle=IR_DUTY_CYCLE_DEFAULT,
         ir_pwm_backend=IR_PWM_BACKEND_DEFAULT,
+        ir_pwm_chip=IR_PWM_CHIP_DEFAULT,
+        ir_pwm_channel=IR_PWM_CHANNEL_DEFAULT,
         ir_emitter_enabled=IR_EMITTER_ENABLED_DEFAULT,
         ir_burst_enabled=IR_BURST_ENABLED_DEFAULT,
         ir_burst_on_time=IR_BURST_ON_DEFAULT,
@@ -195,6 +202,8 @@ class Chronometer:
         self.ir_frequency = ir_frequency
         self.ir_duty_cycle = ir_duty_cycle
         self.ir_pwm_backend = normalize_pwm_backend(ir_pwm_backend)
+        self.ir_pwm_chip = int(ir_pwm_chip)
+        self.ir_pwm_channel = ir_pwm_channel
         self.ir_emitter_enabled = ir_emitter_enabled
         self.ir_burst_enabled = _bool_value(ir_burst_enabled, True)
         self.ir_burst_on_time = max(0.0005, float(ir_burst_on_time))
@@ -226,7 +235,9 @@ class Chronometer:
         self._ir_burst_thread = None
         self._ir_burst_stop = threading.Event()
         self._pigpio = None
+        self._kernel_pwm = None
         self._using_pigpio_pwm = False
+        self._using_kernel_pwm = False
         self._gpio_ready = False
         self._ir_emitter_active = False
         self._ir_emitter_mode = None
@@ -833,7 +844,55 @@ class Chronometer:
 
         duty_cycle = max(0, min(100, self.ir_duty_cycle))
         self._using_pigpio_pwm = False
+        self._using_kernel_pwm = False
+        self._kernel_pwm = None
         self._ir_pwm = None
+
+        if self.ir_pwm_backend in ("auto", "kernel_pwm"):
+            try:
+                if self.ir_led_pin not in HARDWARE_PWM_PINS:
+                    raise RuntimeError(
+                        f"GPIO{self.ir_led_pin} nao suporta PWM de hardware; use {sorted(HARDWARE_PWM_PINS)}"
+                    )
+                self._kernel_pwm = KernelSysfsPWM(
+                    self.ir_led_pin,
+                    chip=self.ir_pwm_chip,
+                    channel=self.ir_pwm_channel,
+                )
+                self._kernel_pwm.setup()
+                if not self.ir_burst_enabled:
+                    self._kernel_pwm.start(self.ir_frequency, duty_cycle)
+                self._using_kernel_pwm = True
+                self._ir_emitter_active = True
+                self._ir_emitter_mode = (
+                    "kernel.sysfs.PWM.burst" if self.ir_burst_enabled else "kernel.sysfs.PWM"
+                )
+                self._ir_emitter_error = None
+                logging.info(
+                    "LED IR em GPIO %s com PWM de hardware do kernel %sHz e duty %.1f%% "
+                    "(pwmchip%s/pwm%s).",
+                    self.ir_led_pin,
+                    self.ir_frequency,
+                    duty_cycle,
+                    self.ir_pwm_chip,
+                    kernel_pwm_channel_for_pin(self.ir_led_pin, self.ir_pwm_channel),
+                )
+                if self.ir_burst_enabled:
+                    self._start_ir_burst_thread(duty_cycle)
+                return
+            except Exception as exc:
+                self._kernel_pwm = None
+                if self.ir_pwm_backend == "kernel_pwm":
+                    self._ir_emitter_active = False
+                    self._ir_emitter_mode = "kernel.sysfs.PWM"
+                    self._ir_emitter_error = f"{type(exc).__name__}: {exc}"
+                    logging.error(
+                        "Emissor IR nao inicializado: AGILITY_IR_PWM_BACKEND=kernel_pwm, "
+                        "mas PWM do kernel falhou: %s",
+                        exc,
+                    )
+                    return
+                logging.warning("Falha ao iniciar PWM do kernel: %s. Tentando pigpio/RPi.GPIO.", exc)
 
         if self.ir_pwm_backend in ("auto", "pigpio"):
             try:
@@ -904,6 +963,13 @@ class Chronometer:
             logging.exception("Falha ao inicializar emissor IR.")
 
     def _set_ir_carrier_active(self, active, duty_cycle):
+        if self._using_kernel_pwm and self._kernel_pwm is not None:
+            if active:
+                self._kernel_pwm.start(self.ir_frequency, duty_cycle)
+            else:
+                self._kernel_pwm.off()
+            return
+
         if self._using_pigpio_pwm and self._pigpio is not None:
             self._pigpio.hardware_PWM(
                 self.ir_led_pin,
@@ -953,6 +1019,12 @@ class Chronometer:
     def _stop_ir_emitter(self):
         self._stop_ir_burst_thread()
 
+        if self._using_kernel_pwm and self._kernel_pwm is not None:
+            try:
+                self._kernel_pwm.cleanup()
+            except Exception:
+                logging.exception("Falha ao desligar PWM do kernel do emissor IR.")
+
         if self._using_pigpio_pwm and self._pigpio is not None:
             try:
                 self._pigpio.hardware_PWM(self.ir_led_pin, 0, 0)
@@ -976,7 +1048,9 @@ class Chronometer:
                 pass
 
         self._pigpio = None
+        self._kernel_pwm = None
         self._using_pigpio_pwm = False
+        self._using_kernel_pwm = False
         self._ir_pwm = None
         self._ir_emitter_active = False
 
@@ -1193,6 +1267,8 @@ class Chronometer:
                     hold_duration=IR_CALIBRATION_HOLD_DEFAULT,
                     saturation_gap=IR_CALIBRATION_SATURATION_GAP_DEFAULT,
                     pwm_backend=self.ir_pwm_backend,
+                    pwm_chip=self.ir_pwm_chip,
+                    pwm_channel=self.ir_pwm_channel,
                     progress=self._set_calibration_progress,
                 )
                 recommendation = result.get("recommendation")
@@ -1474,6 +1550,17 @@ class Chronometer:
             "emissor_modo": self._ir_emitter_mode,
             "emissor_erro": self._ir_emitter_error,
             "emissor_pwm_backend": self.ir_pwm_backend,
+            "emissor_pwm_chip": self.ir_pwm_chip,
+            "emissor_pwm_channel": kernel_pwm_channel_for_pin(
+                self.ir_led_pin,
+                self.ir_pwm_channel,
+            )
+            if self.ir_led_pin in HARDWARE_PWM_PINS
+            else self.ir_pwm_channel,
+            "emissor_kernel_pwm_ativo": self._using_kernel_pwm,
+            "emissor_kernel_pwm_path": (
+                str(self._kernel_pwm.pwm_path) if self._kernel_pwm is not None else None
+            ),
             "emissor_hardware_pwm_gpio_suportados": sorted(HARDWARE_PWM_PINS),
             "emissor_rajada_habilitada": self.ir_burst_enabled,
             "emissor_rajada_on": self.ir_burst_on_time,

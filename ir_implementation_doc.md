@@ -25,11 +25,15 @@ Durante os testes foi observado que o receptor nao funcionava de forma confiavel
 
 - Raspberry Pi documentation, GPIO and 40-pin header: https://www.raspberrypi.com/documentation/computers/raspberry-pi.html#gpio-and-the-40-pin-header
   - A documentacao informa que GPIOs de saida trabalham em `3.3V`, GPIOs de entrada sao tolerantes a `3.3V` e alerta para nao usar `5V` em componentes de `3.3V`.
-  - A documentacao tambem lista PWM por hardware nos GPIOs `12`, `13`, `18` e `19`; por isso `GPIO18` e adequado para `pigpio.hardware_PWM`.
+  - A documentacao tambem lista PWM por hardware nos GPIOs `12`, `13`, `18` e `19`; por isso `GPIO18` e adequado para PWM por hardware.
 - pigpio Python source/documentation: https://github.com/joan2937/pigpio/blob/master/pigpio.py
   - O modulo Python se comunica com o daemon `pigpiod`.
   - O uso normal exige o daemon ativo, normalmente iniciado com `sudo pigpiod` ou via `systemctl`.
   - `hardware_PWM(gpio, PWMfreq, PWMduty)` usa duty na escala `0..1000000`; duty de 50% corresponde a `500000`.
+- rpi-hardware-pwm: https://github.com/Pioreactor/rpi_hardware_pwm
+  - A biblioteca usa PWM por hardware via `/sys/class/pwm`.
+  - A instalacao recomenda `dtoverlay=pwm-2chan` em `/boot/firmware/config.txt`.
+  - Em modelos anteriores ao Raspberry Pi 5, o overlay padrao usa `GPIO18` como `PWM0` e `GPIO19` como `PWM1`.
 - Vishay TSSP40 datasheet: https://www.vishay.com/docs/82458/tssp40.pdf
   - A familia TSSP e voltada a presenca, proximidade e barreira.
   - O datasheet descreve saida ativa em nivel baixo em resposta a rajadas IR.
@@ -59,7 +63,7 @@ Resultado importante observado na Raspberry:
   - `58000Hz`
   - `56000Hz`
   - `53000Hz`
-- A recomendacao inicial do teste apontou `57000Hz`, mas para `pigpio.hardware_PWM` foi escolhido `56000Hz` como default conservador por coincidir com uma frequencia comum em sensores TSSP de 56 kHz.
+- A recomendacao inicial do teste apontou `57000Hz`, mas foi escolhido `56000Hz` como default conservador por coincidir com uma frequencia comum em sensores TSSP de 56 kHz.
 
 ## Decisao de arquitetura
 
@@ -101,7 +105,45 @@ Observacao eletrica:
 - Se for necessario mais alcance ou intensidade no LED IR, a alternativa mais segura e alimentar apenas o ramo emissor do LED IR em `5V`, mantendo GND comum e acionamento via transistor pelo GPIO.
 - Se o receptor for alimentado em `5V`, a saida para o GPIO17 deve passar por divisor de tensao ou level shifter, pois os GPIOs da Raspberry nao sao tolerantes a `5V`.
 
-## Uso de pigpio.hardware_PWM
+## Uso de PWM por hardware
+
+O caminho recomendado passou a ser o PWM de hardware exposto pelo kernel em
+`/sys/class/pwm`, porque ele nao depende do daemon `pigpiod`. A referencia
+principal para esse fluxo e a biblioteca `rpi-hardware-pwm`, que documenta
+`dtoverlay=pwm-2chan` em `/boot/firmware/config.txt`; em modelos anteriores ao
+Pi 5, esse overlay usa `GPIO18` como `PWM0` e `GPIO19` como `PWM1`.
+
+Configuracao na Raspberry:
+
+```bash
+chmod +x rasp_scripts/configurar_pwm_hardware.sh
+./rasp_scripts/configurar_pwm_hardware.sh
+sudo reboot
+```
+
+Depois do reboot:
+
+```bash
+lsmod | grep pwm
+ls -la /sys/class/pwm
+python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm --freqs 56000 --duration 0.2 --skip-hold
+```
+
+Variaveis para exigir esse caminho no backend:
+
+```bash
+export AGILITY_IR_PWM_BACKEND=kernel_pwm
+export AGILITY_IR_PWM_CHIP=0
+export AGILITY_IR_PWM_CHANNEL=0
+```
+
+Em `auto`, a ordem agora e:
+
+- `kernel_pwm`: PWM do kernel via `/sys/class/pwm`.
+- `pigpio`: `pigpio.hardware_PWM`, quando `pigpiod` existir.
+- `rpi_gpio`: fallback por software com `RPi.GPIO.PWM`.
+
+## Uso legado de pigpio.hardware_PWM
 
 Foi implementado suporte a `pigpio.hardware_PWM` porque `RPi.GPIO.PWM` e PWM por software e pode variar mais em frequencias altas. A Raspberry Pi oferece PWM por hardware em GPIOs especificos; no projeto, `GPIO18` e um desses pinos.
 
@@ -118,8 +160,8 @@ pacote `python3-pigpio` estava disponivel, mas o pacote servidor `pigpio` nao
 tinha candidato no APT. O pacote `pigpio-tools` informou que, nessa base Debian,
 apenas o lado cliente e empacotado porque o servidor e incompativel com os
 kernels Debian. Resultado pratico: o modulo `pigpio` importa, mas
-`pigpio.pi().connected` retorna `False`, e o backend em `auto` usa
-`RPi.GPIO.PWM`.
+`pigpio.pi().connected` retorna `False`. Por isso foi adicionado o backend
+`kernel_pwm`, que evita depender de `pigpiod`.
 
 Variavel de selecao:
 
@@ -129,7 +171,8 @@ export AGILITY_IR_PWM_BACKEND=auto
 
 Modos:
 
-- `auto`: tenta `pigpio.hardware_PWM`; se falhar, usa `RPi.GPIO.PWM`.
+- `auto`: tenta `kernel_pwm`; se falhar, tenta `pigpio.hardware_PWM`; se falhar, usa `RPi.GPIO.PWM`.
+- `kernel_pwm`: exige o overlay `pwm-2chan` carregado e permissao de escrita em `/sys/class/pwm`.
 - `pigpio`: exige `pigpiod` funcionando e deixa erro explicito se nao conseguir conectar.
 - `rpi_gpio`: usa o PWM de `RPi.GPIO`.
 
@@ -229,11 +272,11 @@ O backend nao deve tratar cada pulso da rajada como evento de prova. O evento de
 - Sensor IR sem identificacao precisa ser tratado empiricamente; datasheets indicam principios, mas nao substituem calibracao do hardware real.
 - Portadora continua pode falhar em receptores demodulados por causa de AGC ou supressao de sinais continuos.
 - A barreira mais adequada e por rajadas continuas: portadora PWM rapida com pausas curtas.
-- `GPIO18` e adequado para `pigpio.hardware_PWM` na Raspberry Pi Zero 2 W.
+- `GPIO18` e adequado para PWM por hardware na Raspberry Pi Zero 2 W.
 - Alimentar o circuito do receptor em `3.3V` reduz risco de dano ao GPIO e simplifica a leitura logica.
 - O teste de frequencias precisa desligar o emissor entre tentativas, pois a condicao anterior do receptor influencia a leitura seguinte.
 - A faixa de `50kHz` a `60kHz` foi a mais promissora no hardware testado.
-- `56000Hz` e um default tecnico razoavel para `pigpio.hardware_PWM`, mas a calibracao pode escolher outro valor, como `57000Hz`, se o conjunto fisico responder melhor.
+- `56000Hz` e um default tecnico razoavel para PWM por hardware, mas a calibracao pode escolher outro valor, como `57000Hz`, se o conjunto fisico responder melhor.
 - O backend precisa expor status de hardware suficiente para diagnostico remoto: frequencia, duty, backend PWM, conexao pigpio, nivel atual, estado do feixe, erros de GPIO e ultima calibracao.
 
 ## Pendencias e proximos testes
@@ -242,7 +285,7 @@ O backend nao deve tratar cada pulso da rajada como evento de prova. O evento de
   - `python3-rpi.gpio` instalado.
   - `python3-pigpio` instalado.
   - se o objetivo for PWM por hardware, instalar `pigpiod` por uma fonte compativel com a imagem usada ou trocar para uma imagem que forneca o daemon.
-- Confirmar que `/config/ir/status` mostra `pigpio_conectado=true` somente quando `pigpiod` existir e estiver ativo; caso contrario, confirmar fallback para `RPi.GPIO.PWM`.
+- Confirmar que `/config/ir/status` mostra `emissor_modo=kernel.sysfs.PWM.burst` quando o overlay estiver ativo; se `pigpiod` existir, `pigpio_conectado=true` tambem pode aparecer no caminho legado.
 - Executar `POST /config/ir/calibracao` com emissor e receptor alinhados.
 - Verificar se `ir_calibration.json` e criado.
 - Preparar prova, autorizar largada e confirmar que:
