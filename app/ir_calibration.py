@@ -491,8 +491,8 @@ def choose_recommendation(
 
 
 def recommended_burst_times(hold_stats):
-    default_on = 0.002
-    default_off = 0.018
+    default_on = 0.006
+    default_off = 0.014
     if not hold_stats or hold_stats["lost_after"] is None:
         return default_on, default_off
     if hold_stats["lost_after"] <= 0:

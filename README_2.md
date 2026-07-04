@@ -136,8 +136,8 @@ export AGILITY_IR_PWM_CHIP=0
 export AGILITY_IR_PWM_CHANNEL=0
 export AGILITY_IR_EMITTER_ENABLED=1
 export AGILITY_IR_BURST_ENABLED=1
-export AGILITY_IR_BURST_ON=0.002
-export AGILITY_IR_BURST_OFF=0.018
+export AGILITY_IR_BURST_ON=0.006
+export AGILITY_IR_BURST_OFF=0.014
 export AGILITY_SENSOR_READ_MODE=auto
 export AGILITY_SENSOR_POLL_INTERVAL=0.001
 export AGILITY_SENSOR_DEBOUNCE=1.0
@@ -170,7 +170,7 @@ O modo padrão `AGILITY_SENSOR_READ_MODE=auto` tenta usar interrupção por bord
 
 O circuito com LED indicador costuma ficar aceso sem sinal e apagar quando o receptor detecta IR. Nessa montagem, o GPIO normalmente fica `HIGH` com feixe alinhado e `LOW` com feixe quebrado/sem sinal; por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`. Confirme sempre com o script de teste, porque a ligação elétrica pode inverter esse comportamento.
 
-Como esse tipo de receptor pode ignorar portadora contínua depois de algum tempo, o emissor usa rajadas por padrão com `AGILITY_IR_BURST_ENABLED=1`, `AGILITY_IR_BURST_ON=0.002` e `AGILITY_IR_BURST_OFF=0.018`. O backend considera o feixe alinhado enquanto recebe pulsos recentes; se passar `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12` sem pulsos, considera feixe quebrado.
+Como esse tipo de receptor pode ignorar portadora contínua depois de algum tempo, o emissor usa rajadas por padrão com `AGILITY_IR_BURST_ENABLED=1`, `AGILITY_IR_BURST_ON=0.006` e `AGILITY_IR_BURST_OFF=0.014`. O backend considera o feixe alinhado enquanto recebe pulsos recentes; se passar `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12` sem pulsos, considera feixe quebrado.
 
 Para evitar duplo disparo quando o cachorro cruza o feixe, o backend ignora novas bordas durante `AGILITY_SENSOR_DEBOUNCE`. O bloqueio por rearme físico fica desligado por padrão com `AGILITY_SENSOR_REQUIRE_REARM=0`, porque alguns receptores IR não voltam para o nível livre de forma estável. Use `AGILITY_SENSOR_REQUIRE_REARM=1` apenas se `GET /hardware/estado` mostrar `sensor_estado_sinal` alternando de forma limpa entre `feixe_alinhado` e `feixe_quebrado`. `AGILITY_SENSOR_TRIGGER_CONFIRM=0.002` confirma que o nível ativo permaneceu estável por 2 ms antes de aceitar a largada/chegada.
 

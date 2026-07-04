@@ -89,6 +89,22 @@ Resultado apos ajustes de circuito e nova calibracao:
   - `logical_break_delta=0`
   - `break_seen=false`
   - Interpretacao: se o emissor/receptor foi tampado durante essa janela, o bloqueio fisico nao cortou todo o IR recebido; o backend continuou recebendo pulsos dentro do timeout logico.
+- Teste de envelopes de rajada em `50000Hz`, `50%` de duty da portadora, duracao de `8s` por padrao:
+  - `2ms/18ms`: `high_pct=12.5`, `max_gap=0.021s`, sem perda.
+  - `4ms/16ms`: `high_pct=21.4`, `max_gap=0.020s`, sem perda.
+  - `6ms/14ms`: `high_pct=29.6`, `max_gap=0.018s`, sem perda.
+  - `8ms/12ms`: perdeu sinal apos `4.024s`.
+  - `10ms/10ms`: perdeu sinal apos `2.783s`.
+  - `12ms/8ms`: perdeu sinal apos `2.240s`.
+  - `14ms/6ms`: perdeu sinal apos `1.853s`.
+  - `16ms/4ms`: perdeu sinal apos `1.586s`.
+  - `18ms/2ms`: perdeu sinal apos `1.384s`.
+- Teste de portadora continua em `50000Hz`, `50%` de duty, por `60s`:
+  - perdeu sinal apos `1.314s`;
+  - resultado final `high_pct=2.0`, `low_pct=98.0`, `max_gap=58.806s`.
+- Teste longo de `6ms/14ms` por `60s`:
+  - `high_pct=30.1`, `low_pct=69.9`, `max_gap=0.020s`, `lost_after=null`.
+  - Este foi o melhor envelope encontrado antes de iniciar saturacao/supressao.
 
 ## Decisao de arquitetura
 
@@ -108,8 +124,8 @@ export AGILITY_IR_FREQUENCY=50000
 export AGILITY_IR_DUTY_CYCLE=50
 export AGILITY_IR_PWM_BACKEND=auto
 export AGILITY_IR_BURST_ENABLED=1
-export AGILITY_IR_BURST_ON=0.002
-export AGILITY_IR_BURST_OFF=0.018
+export AGILITY_IR_BURST_ON=0.006
+export AGILITY_IR_BURST_OFF=0.014
 export AGILITY_SENSOR_ACTIVE_LEVEL=LOW
 export AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12
 export AGILITY_SENSOR_TRIGGER_CONFIRM=0.002
@@ -123,8 +139,10 @@ Justificativa do envelope padrao:
 - No teste real da Raspberry com o circuito alimentado em `3.3V`, o sensor ainda detectou o emissor; portanto a montagem atual e suficiente para testes.
 - A portadora continua gerou leitura inicial, mas perdeu estabilidade rapidamente; no teste final com `kernel_pwm`, `50000Hz` respondeu com melhor margem e sem saturacao no hold de `1s`.
 - A rajada `2ms/2ms` tambem funcionou no inicio, mas saturou em aproximadamente `3s` no teste de 5s.
-- A rajada `2ms/18ms` manteve pulsos ate o final do teste de 5s, com cerca de `10%` das leituras em nivel de sinal e lacuna maxima observada de aproximadamente `20ms`.
-- Por isso o default passou a usar `AGILITY_IR_BURST_ON=0.002`, `AGILITY_IR_BURST_OFF=0.018` e `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12`, permitindo tolerar pequenas perdas de pulso sem tratar cada pausa da rajada como quebra do feixe. O timeout foi mantido acima da lacuna ideal de `20ms` porque o backend real pode ter jitter de polling quando esta atendendo API/WebSocket.
+- A rajada `2ms/18ms` manteve pulsos ate o final do teste de 5s, mas deixava o GPIO em nivel de sinal por tempo muito baixo para o LED indicador bruto parecer apagado.
+- O teste comparativo de envelopes mostrou que `6ms/14ms` e o maior tempo ligado que permaneceu estavel por `60s`; a partir de `8ms/12ms`, o receptor comeca a suprimir o sinal depois de alguns segundos.
+- Por isso o default passou a usar `AGILITY_IR_BURST_ON=0.006`, `AGILITY_IR_BURST_OFF=0.014` e `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12`, permitindo tolerar pequenas perdas de pulso sem tratar cada pausa da rajada como quebra do feixe. O timeout foi mantido acima da lacuna ideal de `20ms` porque o backend real pode ter jitter de polling quando esta atendendo API/WebSocket.
+- O LED indicador do circuito do TCC esta ligado ao sinal bruto do receptor. Em modo rajada, esse LED nao representa o `sensor_estado_feixe` logico do backend: ele pode continuar visualmente aceso ou parcialmente aceso mesmo com o feixe alinhado, porque o receptor alterna entre pulsos detectados e pausas. Para um LED que apague com feixe logico alinhado e acenda ao cortar o feixe, e necessario adicionar uma etapa de retencao/monostavel/RC no circuito ou acionar esse LED por um GPIO controlado pelo backend.
 - Como o receptor nao identificado respondeu a quase toda a faixa testada, pequenas diferencas de amostragem nao devem definir a frequencia final. `AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE=1.0` trata respostas dentro de 1 ponto percentual como empate e usa `AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY=50000` como desempate.
 
 Observacao eletrica:
