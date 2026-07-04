@@ -135,6 +135,7 @@ def main():
             saturation_gap=args.saturation_gap,
             freqs=args.freqs,
             skip_hold=args.skip_hold,
+            preferred_frequency=args.preferred_frequency,
             pwm_backend=args.pwm_backend,
             pwm_chip=args.pwm_chip,
             pwm_channel=args.pwm_channel,

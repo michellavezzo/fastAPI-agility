@@ -79,4 +79,4 @@ echo
 echo "Depois do reboot, valide com:"
 echo "  lsmod | grep pwm"
 echo "  ls -la /sys/class/pwm"
-echo "  python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm --freqs 56000 --duration 0.2 --skip-hold"
+echo "  python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm --freqs 52000 --duration 0.2 --skip-hold"

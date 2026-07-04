@@ -110,7 +110,7 @@ else:
 
 GPIO_PIN_DEFAULT = int(os.environ.get("AGILITY_GPIO_PIN", "17"))
 IR_LED_PIN_DEFAULT = int(os.environ.get("AGILITY_IR_LED_PIN", "18"))
-IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "56000"))
+IR_FREQUENCY_DEFAULT = int(os.environ.get("AGILITY_IR_FREQUENCY", "52000"))
 IR_DUTY_CYCLE_DEFAULT = float(os.environ.get("AGILITY_IR_DUTY_CYCLE", "50"))
 IR_BURST_ON_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_ON", "0.002"))
 IR_BURST_OFF_DEFAULT = float(os.environ.get("AGILITY_IR_BURST_OFF", "0.018"))
@@ -160,6 +160,9 @@ IR_CALIBRATION_SENSITIVITY_DELTA_DEFAULT = float(
 )
 IR_CALIBRATION_SATURATION_GAP_DEFAULT = float(
     os.environ.get("AGILITY_IR_CALIBRATION_SATURATION_GAP", "0.05")
+)
+IR_CALIBRATION_PREFERRED_FREQUENCY_DEFAULT = int(
+    os.environ.get("AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY", str(IR_FREQUENCY_DEFAULT))
 )
 SENSOR_REQUIRE_REARM_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_REARM", False)
 SENSOR_REQUIRE_READY_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_READY", True)
@@ -1266,6 +1269,7 @@ class Chronometer:
                     sensitivity_delta=IR_CALIBRATION_SENSITIVITY_DELTA_DEFAULT,
                     hold_duration=IR_CALIBRATION_HOLD_DEFAULT,
                     saturation_gap=IR_CALIBRATION_SATURATION_GAP_DEFAULT,
+                    preferred_frequency=IR_CALIBRATION_PREFERRED_FREQUENCY_DEFAULT,
                     pwm_backend=self.ir_pwm_backend,
                     pwm_chip=self.ir_pwm_chip,
                     pwm_channel=self.ir_pwm_channel,

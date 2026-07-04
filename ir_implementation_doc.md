@@ -63,7 +63,7 @@ Resultado importante observado na Raspberry:
   - `58000Hz`
   - `56000Hz`
   - `53000Hz`
-- A recomendacao inicial do teste apontou `57000Hz`, mas foi escolhido `56000Hz` como default conservador por coincidir com uma frequencia comum em sensores TSSP de 56 kHz.
+- A recomendacao inicial do teste apontou `57000Hz`, mas os testes com `kernel_pwm` e circuito estabilizado em `3.3V` indicaram `52000Hz` como valor pratico melhor neste conjunto.
 
 ## Decisao de arquitetura
 
@@ -79,7 +79,7 @@ Configuracao padrao implementada:
 ```bash
 export AGILITY_GPIO_PIN=17
 export AGILITY_IR_LED_PIN=18
-export AGILITY_IR_FREQUENCY=56000
+export AGILITY_IR_FREQUENCY=52000
 export AGILITY_IR_DUTY_CYCLE=50
 export AGILITY_IR_PWM_BACKEND=auto
 export AGILITY_IR_BURST_ENABLED=1
@@ -94,7 +94,7 @@ export AGILITY_SENSOR_READY_MIN_RATIO=0.2
 Justificativa do envelope padrao:
 
 - No teste real da Raspberry com o circuito alimentado em `3.3V`, o sensor ainda detectou o emissor; portanto a montagem atual e suficiente para testes.
-- A portadora continua em `56000Hz` gerou leitura inicial, mas perdeu estabilidade rapidamente.
+- A portadora continua gerou leitura inicial, mas perdeu estabilidade rapidamente; no teste mais recente com `kernel_pwm`, `52000Hz` respondeu bem.
 - A rajada `2ms/2ms` tambem funcionou no inicio, mas saturou em aproximadamente `3s` no teste de 5s.
 - A rajada `2ms/18ms` manteve pulsos ate o final do teste de 5s, com cerca de `10%` das leituras em nivel de sinal e lacuna maxima observada de aproximadamente `20ms`.
 - Por isso o default passou a usar `AGILITY_IR_BURST_ON=0.002`, `AGILITY_IR_BURST_OFF=0.018` e `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12`, permitindo tolerar pequenas perdas de pulso sem tratar cada pausa da rajada como quebra do feixe. O timeout foi mantido acima da lacuna ideal de `20ms` porque o backend real pode ter jitter de polling quando esta atendendo API/WebSocket.
@@ -126,7 +126,7 @@ Depois do reboot:
 ```bash
 lsmod | grep pwm
 ls -la /sys/class/pwm
-python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm --freqs 56000 --duration 0.2 --skip-hold
+python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm --freqs 52000 --duration 0.2 --skip-hold
 ```
 
 Variaveis para exigir esse caminho no backend:
@@ -276,7 +276,7 @@ O backend nao deve tratar cada pulso da rajada como evento de prova. O evento de
 - Alimentar o circuito do receptor em `3.3V` reduz risco de dano ao GPIO e simplifica a leitura logica.
 - O teste de frequencias precisa desligar o emissor entre tentativas, pois a condicao anterior do receptor influencia a leitura seguinte.
 - A faixa de `50kHz` a `60kHz` foi a mais promissora no hardware testado.
-- `56000Hz` e um default tecnico razoavel para PWM por hardware, mas a calibracao pode escolher outro valor, como `57000Hz`, se o conjunto fisico responder melhor.
+- `52000Hz` e o default pratico atual para este conjunto fisico, mas a calibracao pode escolher outro valor se o conjunto responder melhor.
 - O backend precisa expor status de hardware suficiente para diagnostico remoto: frequencia, duty, backend PWM, conexao pigpio, nivel atual, estado do feixe, erros de GPIO e ultima calibracao.
 
 ## Pendencias e proximos testes
