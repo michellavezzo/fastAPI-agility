@@ -136,6 +136,7 @@ def main():
             freqs=args.freqs,
             skip_hold=args.skip_hold,
             preferred_frequency=args.preferred_frequency,
+            preference_tolerance=args.preference_tolerance,
             pwm_backend=args.pwm_backend,
             pwm_chip=args.pwm_chip,
             pwm_channel=args.pwm_channel,

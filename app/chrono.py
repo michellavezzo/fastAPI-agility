@@ -164,6 +164,9 @@ IR_CALIBRATION_SATURATION_GAP_DEFAULT = float(
 IR_CALIBRATION_PREFERRED_FREQUENCY_DEFAULT = int(
     os.environ.get("AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY", str(IR_FREQUENCY_DEFAULT))
 )
+IR_CALIBRATION_PREFERENCE_TOLERANCE_DEFAULT = float(
+    os.environ.get("AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE", "1.0")
+)
 SENSOR_REQUIRE_REARM_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_REARM", False)
 SENSOR_REQUIRE_READY_DEFAULT = _env_bool("AGILITY_SENSOR_REQUIRE_READY", True)
 
@@ -1270,6 +1273,7 @@ class Chronometer:
                     hold_duration=IR_CALIBRATION_HOLD_DEFAULT,
                     saturation_gap=IR_CALIBRATION_SATURATION_GAP_DEFAULT,
                     preferred_frequency=IR_CALIBRATION_PREFERRED_FREQUENCY_DEFAULT,
+                    preference_tolerance=IR_CALIBRATION_PREFERENCE_TOLERANCE_DEFAULT,
                     pwm_backend=self.ir_pwm_backend,
                     pwm_chip=self.ir_pwm_chip,
                     pwm_channel=self.ir_pwm_channel,

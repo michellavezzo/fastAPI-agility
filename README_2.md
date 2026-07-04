@@ -160,10 +160,11 @@ export AGILITY_IR_CALIBRATION_APPLY=1
 export AGILITY_IR_CALIBRATION_SAVE=1
 export AGILITY_IR_USE_SAVED_CALIBRATION=1
 export AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY=52000
+export AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE=1.0
 ```
 
 Quando `AGILITY_IR_CALIBRATE_ON_STARTUP=1`, o backend bloqueia o startup até terminar a varredura. O resultado fica salvo em `ir_calibration.json` e também pode ser gerado pela tela `/config` ou pelo endpoint `POST /config/ir/calibracao`.
-Quando várias frequências respondem de forma praticamente igual, a calibração usa `AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY` como desempate para evitar escolher `10000Hz` apenas por ser a primeira frequência da varredura.
+Quando várias frequências respondem de forma praticamente igual, a calibração usa `AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE` para tratar pequenas diferenças de amostragem como empate e `AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY` como desempate. Isso evita escolher `10000Hz` ou outra frequência apenas por aparecer com poucos décimos percentuais a mais na varredura.
 
 O modo padrão `AGILITY_SENSOR_READ_MODE=auto` tenta usar interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para evitar que cada pulso da rajada seja tratado como largada/chegada. O evento de prova é disparado apenas quando o backend deixa de receber pulsos recentes por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
 

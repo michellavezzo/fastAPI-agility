@@ -102,6 +102,7 @@ export AGILITY_IR_CALIBRATE_ON_STARTUP=1
 export AGILITY_IR_CALIBRATION_APPLY=1
 export AGILITY_IR_CALIBRATION_SAVE=1
 export AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY=52000
+export AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE=1.0
 ```
 
 `AGILITY_SENSOR_READ_MODE=auto` tenta interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para que as rajadas não gerem falsos eventos.

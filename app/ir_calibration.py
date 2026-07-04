@@ -450,7 +450,17 @@ def frequency_preference_score(freq, preferred_frequency):
     return -abs(int(freq) - int(preferred_frequency))
 
 
-def choose_recommendation(sensitive, hold_results, preferred_frequency=None):
+def preference_bucket(value, tolerance):
+    tolerance = max(float(tolerance or 0), 0.001)
+    return round(float(value) / tolerance)
+
+
+def choose_recommendation(
+    sensitive,
+    hold_results,
+    preferred_frequency=None,
+    preference_tolerance=1.0,
+):
     if hold_results:
         stable = [item for item in hold_results if not item["hold"]["saturated"]]
         candidates = stable if stable else hold_results
@@ -458,18 +468,23 @@ def choose_recommendation(sensitive, hold_results, preferred_frequency=None):
             candidates,
             key=lambda item: (
                 not item["hold"]["saturated"],
+                preference_bucket(item["hold"]["expected_pct"], preference_tolerance),
+                preference_bucket(item["scan"]["delta"], preference_tolerance),
+                frequency_preference_score(item["scan"]["freq"], preferred_frequency),
                 item["hold"]["expected_pct"],
                 item["scan"]["delta"],
-                frequency_preference_score(item["scan"]["freq"], preferred_frequency),
+                item["scan"]["signal_pct"],
             ),
         )["scan"]
 
     return max(
         sensitive,
         key=lambda item: (
+            preference_bucket(item["delta"], preference_tolerance),
+            preference_bucket(item["signal_pct"], preference_tolerance),
+            frequency_preference_score(item["freq"], preferred_frequency),
             item["delta"],
             item["signal_pct"],
-            frequency_preference_score(item["freq"], preferred_frequency),
         ),
         default=None,
     )
@@ -488,8 +503,21 @@ def recommended_burst_times(hold_stats):
     return burst_on, burst_off
 
 
-def build_recommendation(GPIO, duty, baseline, sensitive, hold_results, preferred_frequency=None):
-    recommendation = choose_recommendation(sensitive, hold_results, preferred_frequency)
+def build_recommendation(
+    GPIO,
+    duty,
+    baseline,
+    sensitive,
+    hold_results,
+    preferred_frequency=None,
+    preference_tolerance=1.0,
+):
+    recommendation = choose_recommendation(
+        sensitive,
+        hold_results,
+        preferred_frequency,
+        preference_tolerance,
+    )
     if recommendation is None:
         return None
 
@@ -575,6 +603,7 @@ def run_ir_calibration(
     freqs=None,
     skip_hold=False,
     preferred_frequency=52000,
+    preference_tolerance=1.0,
     pwm_backend="auto",
     pwm_chip=0,
     pwm_channel=None,
@@ -615,6 +644,7 @@ def run_ir_calibration(
         "saturation_gap": float(saturation_gap),
         "skip_hold": bool(skip_hold),
         "preferred_frequency": int(preferred_frequency) if preferred_frequency is not None else None,
+        "preference_tolerance": float(preference_tolerance),
         "pwm_backend_requested": normalize_pwm_backend(pwm_backend),
         "pwm_chip": int(pwm_chip),
         "pwm_channel": kernel_pwm_channel_for_pin(emitter_pin, pwm_channel),
@@ -669,6 +699,7 @@ def run_ir_calibration(
             sensitive,
             hold_results,
             preferred_frequency=preferred_frequency,
+            preference_tolerance=preference_tolerance,
         )
         if recommendation is not None:
             recommendation["pwm_backend"] = emitter.active_backend
@@ -756,6 +787,12 @@ def build_arg_parser():
         type=int,
         default=52000,
         help="Frequencia preferida para desempate quando varias frequencias responderem igualmente.",
+    )
+    parser.add_argument(
+        "--preference-tolerance",
+        type=float,
+        default=1.0,
+        help="Tolerancia em pontos percentuais para considerar frequencias equivalentes.",
     )
     parser.add_argument(
         "--pwm-backend",
