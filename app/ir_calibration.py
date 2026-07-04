@@ -602,7 +602,7 @@ def run_ir_calibration(
     saturation_gap=0.05,
     freqs=None,
     skip_hold=False,
-    preferred_frequency=52000,
+    preferred_frequency=50000,
     preference_tolerance=1.0,
     pwm_backend="auto",
     pwm_chip=0,
@@ -780,12 +780,12 @@ def build_arg_parser():
     )
     parser.add_argument(
         "--freqs",
-        help="Lista de frequencias separadas por virgula. Ex: 36000,38000,40000,52000",
+        help="Lista de frequencias separadas por virgula. Ex: 36000,38000,40000,50000",
     )
     parser.add_argument(
         "--preferred-frequency",
         type=int,
-        default=52000,
+        default=50000,
         help="Frequencia preferida para desempate quando varias frequencias responderem igualmente.",
     )
     parser.add_argument(

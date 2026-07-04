@@ -77,7 +77,7 @@ PWM por hardware.
 Configuração recomendada para o circuito IR. Ajuste `AGILITY_IR_FREQUENCY` com o resultado de `rasp_scripts/testar_sensor_ir.py`:
 
 ```bash
-export AGILITY_IR_FREQUENCY=52000
+export AGILITY_IR_FREQUENCY=50000
 export AGILITY_IR_PWM_BACKEND=auto
 export AGILITY_IR_PWM_CHIP=0
 export AGILITY_IR_PWM_CHANNEL=0
@@ -101,7 +101,7 @@ Para calibrar automaticamente no startup e salvar a recomendação:
 export AGILITY_IR_CALIBRATE_ON_STARTUP=1
 export AGILITY_IR_CALIBRATION_APPLY=1
 export AGILITY_IR_CALIBRATION_SAVE=1
-export AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY=52000
+export AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY=50000
 export AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE=1.0
 ```
 
