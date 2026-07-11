@@ -66,7 +66,11 @@ class CalibrationMetricsTest(unittest.TestCase):
         self.assertEqual(stats["first_high_confirmed_at"], 0.002)
 
     def test_classification_rejects_confirmed_off_signal(self):
-        noise = [(50000, summarize_samples(FakeGPIO, [0, 1, 1, 1, 0], 0.001, 0.002))]
+        noise = [{
+            "window_index": 0,
+            "candidate_frequency_hz": 50000,
+            "stats": summarize_samples(FakeGPIO, [0, 1, 1, 1, 0], 0.001, 0.002),
+        }]
         active = [(50000, summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002))]
         sensitive, rejected = classify_frequency_results(
             FakeGPIO, noise, active, 25.0, 0.002
@@ -75,7 +79,11 @@ class CalibrationMetricsTest(unittest.TestCase):
         self.assertEqual(rejected[0]["reasons"], ["noise_detected_off"])
 
     def test_classification_keeps_clean_high_contrast_signal(self):
-        noise = [(50000, summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002))]
+        noise = [{
+            "window_index": 0,
+            "candidate_frequency_hz": 50000,
+            "stats": summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002),
+        }]
         active = [(50000, summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002))]
         sensitive, rejected = classify_frequency_results(
             FakeGPIO, noise, active, 25.0, 0.002
@@ -132,7 +140,7 @@ def summarize_samples(GPIO, samples, interval, confirm_time=0.002):
     }
 ```
 
-`read_window()` must collect GPIO samples and return `summarize_samples(...)`. `evaluate_frequency()` must use the active signal level selected by `score_frequency()`, reject a confirmed run at that level in the OFF stats, and add `noise_stats`, `noise_signal_pct`, `noise_longest_run_s`, and `reasons`. `classify_frequency_results()` must pair windows by integer frequency and return clean and rejected lists.
+`read_window()` must collect GPIO samples and return `summarize_samples(...)`. `evaluate_frequency()` must use the active signal level selected by `score_frequency()`, reject a confirmed run at that level in the OFF stats, and add `noise_stats`, `noise_signal_pct`, `noise_longest_run_s`, and `reasons`. It must enforce floors of 25 percentage points and 0.002 seconds even when callers request weaker thresholds. `classify_frequency_results()` must require equal list lengths, pair OFF and active windows by temporal list position, expose `noise_window_index` and `candidate_frequency_hz`, and return clean and rejected lists. The OFF candidate label is diagnostic context, not a measured noise frequency.
 
 - [ ] **Step 4: Add failing tests for margin values and timeout safety**
 
@@ -181,7 +189,8 @@ def minimum_stable_duty(results):
 def calculate_signal_timeout(burst_on, burst_off, max_signal_gap, max_timeout=0.12):
     period = float(burst_on) + float(burst_off)
     timeout = round(max(period * 3, float(max_signal_gap) * 2 + 0.005), 6)
-    valid = timeout <= float(max_timeout)
+    effective_max_timeout = min(float(max_timeout), 0.120)
+    valid = timeout <= effective_max_timeout
     return {
         "signal_timeout": timeout,
         "valid": valid,
