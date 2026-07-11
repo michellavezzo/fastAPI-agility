@@ -916,7 +916,7 @@ def calibration_result_is_valid(result):
     return isinstance(recommendation, dict) and recommendation.get("frequency_hz") is not None
 
 
-def _shortlist_key(candidate, preferred_frequency):
+def _shortlist_key(candidate, preferred_frequency, preference_tolerance):
     scan = candidate["scan"]
     hold = candidate.get("hold")
     hold_stability = hold.get("expected_pct", 0.0) if hold is not None else 100.0
@@ -926,10 +926,13 @@ def _shortlist_key(candidate, preferred_frequency):
         else 0
     )
     return (
+        -preference_bucket(hold_stability, preference_tolerance),
+        -preference_bucket(scan.get("delta", 0.0), preference_tolerance),
+        -preference_bucket(scan.get("signal_pct", 0.0), preference_tolerance),
+        preferred_distance,
         -float(hold_stability),
         -float(scan.get("delta", 0.0)),
         -float(scan.get("signal_pct", 0.0)),
-        preferred_distance,
     )
 
 
@@ -1060,7 +1063,7 @@ def run_ir_calibration(
 
     effective_sensitivity_delta = max(float(sensitivity_delta), 25.0)
     effective_noise_confirm_time = max(float(noise_confirm_time), 0.002)
-    effective_finalist_count = max(1, int(finalist_count))
+    effective_finalist_count = min(5, max(1, int(finalist_count)))
     options = {
         "sensor_pin": int(sensor_pin),
         "emitter_pin": int(emitter_pin),
@@ -1185,7 +1188,11 @@ def run_ir_calibration(
 
         shortlist = sorted(
             shortlist_pool,
-            key=lambda item: _shortlist_key(item, preferred_frequency),
+            key=lambda item: _shortlist_key(
+                item,
+                preferred_frequency,
+                preference_tolerance,
+            ),
         )[:effective_finalist_count]
 
         margin_results = []

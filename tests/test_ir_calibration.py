@@ -647,6 +647,27 @@ class CalibrationPipelineTest(unittest.TestCase):
             "reasons": [],
         }
 
+    @staticmethod
+    def shortlist_candidate(freq, hold_stability, contrast, signal_pct):
+        return {
+            "scan": {
+                "freq": freq,
+                "delta": contrast,
+                "signal_pct": signal_pct,
+            },
+            "hold": {"expected_pct": hold_stability},
+        }
+
+    def sorted_shortlist(self, candidates, preferred_frequency, preference_tolerance):
+        return sorted(
+            candidates,
+            key=lambda candidate: calibration._shortlist_key(
+                candidate,
+                preferred_frequency,
+                preference_tolerance,
+            ),
+        )
+
     def test_candidate_ranking_prefers_lower_stable_duty_before_frequency_preference(self):
         candidates = [
             self.candidate_result(50000, minimum_stable_duty=35.0),
@@ -657,6 +678,26 @@ class CalibrationPipelineTest(unittest.TestCase):
             candidates,
             preferred_frequency=50000,
         )
+
+        self.assertEqual(selected["scan"]["freq"], 48000)
+
+    def test_shortlist_uses_frequency_preference_within_equivalent_tolerance_buckets(self):
+        candidates = [
+            self.shortlist_candidate(50000, 95.1, 80.1, 90.1),
+            self.shortlist_candidate(48000, 95.4, 80.4, 90.4),
+        ]
+
+        selected = self.sorted_shortlist(candidates, 50000, 1.0)[0]
+
+        self.assertEqual(selected["scan"]["freq"], 50000)
+
+    def test_shortlist_keeps_materially_better_bucket_ahead_of_preferred_frequency(self):
+        candidates = [
+            self.shortlist_candidate(50000, 95.4, 80.4, 90.4),
+            self.shortlist_candidate(48000, 96.1, 80.1, 90.1),
+        ]
+
+        selected = self.sorted_shortlist(candidates, 50000, 1.0)[0]
 
         self.assertEqual(selected["scan"]["freq"], 48000)
 
@@ -835,6 +876,51 @@ class CalibrationPipelineTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(tested, [("margin", 50000), ("operational", 50000)])
+
+    def test_pipeline_caps_requested_finalists_at_five(self):
+        events = []
+        emitter = PipelineEmitter(events)
+        frequencies = [44000, 45000, 46000, 47000, 48000, 49000, 50000]
+        noise = [summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002) for _ in frequencies]
+        active = [summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002) for _ in frequencies]
+        windows = iter(noise + active)
+        margin_frequencies = []
+        operational_frequencies = []
+
+        def margin_runner(_GPIO, _pin, _emitter, scan, *_args, **_kwargs):
+            margin_frequencies.append(scan["freq"])
+            return {
+                "requested_duty": 50.0,
+                "minimum_stable_duty": 20.0,
+                "results": [{"duty": 20.0, "valid": True}],
+            }
+
+        def operational_runner(_GPIO, _pin, _emitter, scan, *_args, **_kwargs):
+            operational_frequencies.append(scan["freq"])
+            return self.operational_result()
+
+        with (
+            patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.read_window", side_effect=lambda *_args: next(windows)),
+            patch("app.ir_calibration.read_saturation_window", side_effect=AssertionError("hold ran")),
+            patch("app.ir_calibration.run_margin_test", side_effect=margin_runner),
+            patch("app.ir_calibration.run_operational_test", side_effect=operational_runner),
+        ):
+            result = calibration.run_ir_calibration(
+                FakeGPIO,
+                freqs=frequencies,
+                duration=0,
+                settle=0,
+                recovery=0,
+                skip_hold=True,
+                finalist_count=99,
+            )
+
+        self.assertEqual(result["options"]["finalist_count"], 5)
+        self.assertEqual(len(margin_frequencies), 5)
+        self.assertEqual(len(operational_frequencies), 5)
+        self.assertEqual(len(result["margin"]), 5)
+        self.assertEqual(len(result["burst"]), 5)
 
     def test_no_candidate_returns_diagnostics_without_recommendation(self):
         events = []
