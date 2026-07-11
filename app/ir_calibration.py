@@ -377,6 +377,8 @@ def score_frequency(GPIO, baseline, freq, stats):
 def evaluate_frequency(GPIO, noise_stats, freq, active_stats, min_delta, noise_confirm_time):
     scored = score_frequency(GPIO, noise_stats, freq, active_stats)
     signal_level = scored["signal_level"]
+    effective_min_delta = max(float(min_delta), 25.0)
+    effective_noise_confirm_time = max(float(noise_confirm_time), 0.002)
     noise_signal_pct = level_pct(GPIO, noise_stats, signal_level)
     noise_longest_run_s = (
         noise_stats["max_high_run_s"]
@@ -384,9 +386,9 @@ def evaluate_frequency(GPIO, noise_stats, freq, active_stats, min_delta, noise_c
         else noise_stats["max_low_run_s"]
     )
     reasons = []
-    if scored["delta"] < float(min_delta):
+    if scored["delta"] < effective_min_delta:
         reasons.append("insufficient_delta")
-    if noise_longest_run_s >= float(noise_confirm_time):
+    if noise_longest_run_s >= effective_noise_confirm_time:
         reasons.append("noise_detected_off")
 
     return {
@@ -400,29 +402,22 @@ def evaluate_frequency(GPIO, noise_stats, freq, active_stats, min_delta, noise_c
 
 
 def classify_frequency_results(GPIO, noise_results, active_results, min_delta, noise_confirm_time):
-    noise_by_freq = {int(freq): stats for freq, stats in noise_results}
+    if len(noise_results) != len(active_results):
+        raise CalibrationError("quantidades de janelas OFF e ativas precisam ser iguais")
+
     sensitive = []
     rejected = []
-    for freq, active_stats in active_results:
-        freq = int(freq)
-        noise_stats = noise_by_freq.get(freq)
-        if noise_stats is None:
-            rejected.append({
-                "freq": freq,
-                "stats": active_stats,
-                "reasons": ["missing_noise_stats"],
-                "valid": False,
-            })
-            continue
-
+    for noise_window, (freq, active_stats) in zip(noise_results, active_results):
         result = evaluate_frequency(
             GPIO,
-            noise_stats,
+            noise_window["stats"],
             freq,
             active_stats,
             min_delta,
             noise_confirm_time,
         )
+        result["noise_window_index"] = int(noise_window["window_index"])
+        result["candidate_frequency_hz"] = int(noise_window["candidate_frequency_hz"])
         if result["valid"]:
             sensitive.append(result)
         else:
@@ -443,7 +438,8 @@ def minimum_stable_duty(results):
 def calculate_signal_timeout(burst_on, burst_off, max_signal_gap, max_timeout=0.12):
     period = float(burst_on) + float(burst_off)
     timeout = round(max(period * 3, float(max_signal_gap) * 2 + 0.005), 6)
-    valid = timeout <= float(max_timeout)
+    effective_max_timeout = min(float(max_timeout), 0.120)
+    valid = timeout <= effective_max_timeout
     return {
         "signal_timeout": timeout,
         "valid": valid,
