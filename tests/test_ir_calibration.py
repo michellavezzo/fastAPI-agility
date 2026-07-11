@@ -12,6 +12,7 @@ from app.ir_calibration import (
     classify_frequency_results,
     margin_duty_values,
     minimum_stable_duty,
+    read_burst_window,
     run_margin_test,
     run_operational_test,
     summarize_samples,
@@ -63,6 +64,23 @@ class PipelineEmitter:
     def cleanup(self):
         self.active = False
         self.events.append(("cleanup",))
+
+
+class SynchronousBurstEnvelope:
+    def __init__(self, emitter, frequency, burst_on, burst_off):
+        self.emitter = emitter
+        self.frequency = int(frequency)
+        self.burst_on = float(burst_on)
+        self.burst_off = float(burst_off)
+        self.emitter.events.append(
+            ("burst_init", self.frequency, self.burst_on, self.burst_off)
+        )
+
+    def start(self):
+        self.emitter.set_frequency(self.frequency)
+
+    def stop(self):
+        self.emitter.off()
 
 
 class FakeEmitter:
@@ -126,6 +144,85 @@ class FakeEmitterGPIO:
 
 
 class OperationalHelpersTest(unittest.TestCase):
+    def test_burst_window_wraps_sampling_and_always_stops(self):
+        events = []
+
+        class RecordingEnvelope:
+            def __init__(self, emitter, frequency, burst_on, burst_off):
+                events.append(("init", frequency, burst_on, burst_off))
+
+            def start(self):
+                events.append(("start",))
+
+            def stop(self):
+                events.append(("stop",))
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            events.append(("read", duration, confirm_time))
+            return summarize_samples(GPIO, [1] * 5, interval, confirm_time)
+
+        with patch("app.ir_calibration.BurstEnvelope", RecordingEnvelope):
+            result = read_burst_window(
+                FakeGPIO,
+                17,
+                FakeEmitter(),
+                50000,
+                0.006,
+                0.014,
+                0.005,
+                0.001,
+                0.002,
+                settle=0,
+                window_reader=reader,
+            )
+
+        self.assertEqual(result["high_pct"], 100.0)
+        self.assertEqual(
+            events,
+            [
+                ("init", 50000, 0.006, 0.014),
+                ("start",),
+                ("read", 0.005, 0.002),
+                ("stop",),
+            ],
+        )
+
+    def test_burst_window_stops_when_sampling_fails(self):
+        events = []
+
+        class RecordingEnvelope:
+            def __init__(self, *_args):
+                pass
+
+            def start(self):
+                events.append("start")
+
+            def stop(self):
+                events.append("stop")
+
+        def reader(*_args):
+            raise RuntimeError("sample failed")
+
+        with (
+            patch("app.ir_calibration.BurstEnvelope", RecordingEnvelope),
+            self.assertRaisesRegex(RuntimeError, "sample failed"),
+        ):
+            read_burst_window(
+                FakeGPIO,
+                17,
+                FakeEmitter(),
+                50000,
+                0.006,
+                0.014,
+                0.005,
+                0.001,
+                0.002,
+                settle=0,
+                window_reader=reader,
+            )
+
+        self.assertEqual(events, ["start", "stop"])
+
     def test_burst_envelope_stops_with_emitter_off(self):
         emitter = FakeEmitter()
         envelope = BurstEnvelope(emitter, 50000, 0.001, 0.001)
@@ -221,6 +318,58 @@ class OperationalHelpersTest(unittest.TestCase):
             [50.0, 35.0, 20.0, 10.0],
         )
         self.assertEqual(emitter.duty, 50.0)
+
+    def test_margin_sweep_samples_each_duty_inside_operational_bursts(self):
+        emitter = FakeEmitter()
+        noise = summarize_samples(FakeGPIO, [0] * 10, 0.001, 0.002)
+        events = []
+
+        class RecordingEnvelope:
+            def __init__(self, active_emitter, frequency, burst_on, burst_off):
+                self.active_emitter = active_emitter
+                events.append(("init", frequency, burst_on, burst_off))
+
+            def start(self):
+                events.append(("start", self.active_emitter.duty))
+
+            def stop(self):
+                events.append(("stop", self.active_emitter.duty))
+                self.active_emitter.off()
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            events.append(("read", emitter.duty))
+            return summarize_samples(GPIO, [1] * 10, interval, confirm_time)
+
+        with patch("app.ir_calibration.BurstEnvelope", RecordingEnvelope):
+            result = run_margin_test(
+                FakeGPIO,
+                17,
+                emitter,
+                {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+                noise,
+                0.01,
+                0.001,
+                0,
+                0,
+                25.0,
+                0.002,
+                burst_on=0.006,
+                burst_off=0.014,
+                window_reader=reader,
+            )
+
+        self.assertEqual(result["minimum_stable_duty"], 10.0)
+        self.assertEqual(
+            [event for event in events if event[0] in ("start", "read", "stop")],
+            [
+                ("start", 50.0), ("read", 50.0), ("stop", 50.0),
+                ("start", 35.0), ("read", 35.0), ("stop", 35.0),
+                ("start", 20.0), ("read", 20.0), ("stop", 20.0),
+                ("start", 10.0), ("read", 10.0), ("stop", 10.0),
+            ],
+        )
+        self.assertEqual(emitter.duty, 50.0)
+        self.assertEqual(emitter.events[-1], ("off",))
 
     def test_real_emitter_set_duty_turns_carrier_off_before_clamping(self):
         GPIO = FakeEmitterGPIO()
@@ -694,16 +843,50 @@ class CalibrationPipelineTest(unittest.TestCase):
     def test_shortlist_keeps_materially_better_bucket_ahead_of_preferred_frequency(self):
         candidates = [
             self.shortlist_candidate(50000, 95.4, 80.4, 90.4),
-            self.shortlist_candidate(48000, 96.1, 80.1, 90.1),
+            self.shortlist_candidate(48000, 10.0, 81.1, 90.1),
         ]
 
         selected = self.sorted_shortlist(candidates, 50000, 1.0)[0]
 
         self.assertEqual(selected["scan"]["freq"], 48000)
 
+    def test_shortlist_does_not_prefer_continuous_hold_survival_over_burst_scan(self):
+        candidates = [
+            self.shortlist_candidate(50000, 5.0, 90.1, 90.1),
+            self.shortlist_candidate(48000, 99.0, 89.9, 89.9),
+        ]
+
+        selected = self.sorted_shortlist(candidates, 50000, 1.0)[0]
+
+        self.assertEqual(selected["scan"]["freq"], 50000)
+
     def test_failed_attempt_is_not_persistable(self):
         self.assertFalse(
             calibration.calibration_result_is_valid({"ok": False, "recommendation": None})
+        )
+
+    def test_saved_recommendation_requires_safe_signal_timeout(self):
+        base = {"ok": True, "recommendation": {"frequency_hz": 50000}}
+        self.assertFalse(calibration.calibration_result_is_valid(base))
+
+        for timeout in (0, -0.01, 0.121, 0.360):
+            result = {
+                "ok": True,
+                "recommendation": {
+                    "frequency_hz": 50000,
+                    "sensor_signal_timeout": timeout,
+                },
+            }
+            self.assertFalse(calibration.calibration_result_is_valid(result))
+
+        self.assertTrue(
+            calibration.calibration_result_is_valid({
+                "ok": True,
+                "recommendation": {
+                    "frequency_hz": 50000,
+                    "sensor_signal_timeout": 0.060,
+                },
+            })
         )
 
     def test_cli_accepts_multi_phase_timing_and_finalist_controls(self):
@@ -728,7 +911,13 @@ class CalibrationPipelineTest(unittest.TestCase):
         self.assertEqual(args.max_signal_timeout, 0.1)
         self.assertTrue(
             calibration.calibration_result_is_valid(
-                {"ok": True, "recommendation": {"frequency_hz": 50000}}
+                {
+                    "ok": True,
+                    "recommendation": {
+                        "frequency_hz": 50000,
+                        "sensor_signal_timeout": 0.060,
+                    },
+                }
             )
         )
 
@@ -792,6 +981,7 @@ class CalibrationPipelineTest(unittest.TestCase):
 
         with (
             patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.BurstEnvelope", SynchronousBurstEnvelope),
             patch("app.ir_calibration.read_window", side_effect=window_reader),
             patch("app.ir_calibration.read_saturation_window", side_effect=hold_reader),
             patch("app.ir_calibration.run_margin_test", side_effect=margin_runner),
@@ -812,8 +1002,16 @@ class CalibrationPipelineTest(unittest.TestCase):
             [event for event in events[:first_active] if event[0].startswith("read_")],
             [("read_off",)] * len(frequencies),
         )
-        self.assertEqual(margin_frequencies, [50000])
-        self.assertEqual(operational_frequencies, [50000])
+        self.assertEqual(
+            [event for event in events if event[0] == "burst_init"][:len(frequencies)],
+            [("burst_init", freq, 0.006, 0.014) for freq in frequencies],
+        )
+        self.assertEqual(
+            len([event for event in events if event == ("read_active",)]),
+            len(frequencies),
+        )
+        self.assertEqual(margin_frequencies, [50000, 38000])
+        self.assertEqual(operational_frequencies, [50000, 38000])
         self.assertEqual(result["recommendation"]["frequency_hz"], 50000)
         self.assertEqual(result["recommendation"]["burst_on"], 0.006)
         self.assertEqual(result["recommendation"]["burst_off"], 0.014)
@@ -834,7 +1032,13 @@ class CalibrationPipelineTest(unittest.TestCase):
             {"noise_scan", "rejected", "margin", "burst", "break_tests", "diagnostics"}
             <= result.keys()
         )
-        self.assertEqual(len(result["diagnostics"]["finalist_results"]), 1)
+        self.assertEqual(len(result["diagnostics"]["finalist_results"]), 2)
+        self.assertEqual(result["diagnostics"]["continuous_suppressed_candidates"], 1)
+        self.assertEqual(result["diagnostics"]["continuous_suppression_frequencies"], [38000])
+        self.assertNotIn(
+            "continuous_signal_suppressed",
+            result["diagnostics"]["reason_counts"],
+        )
         self.assertFalse(result["diagnostics"]["physical_break_validated"])
 
     def test_clean_candidates_still_reach_operational_tests_when_hold_is_skipped(self):
@@ -860,6 +1064,7 @@ class CalibrationPipelineTest(unittest.TestCase):
 
         with (
             patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.BurstEnvelope", SynchronousBurstEnvelope),
             patch("app.ir_calibration.read_window", side_effect=lambda *_args: next(windows)),
             patch("app.ir_calibration.read_saturation_window", side_effect=AssertionError("hold ran")),
             patch("app.ir_calibration.run_margin_test", side_effect=margin_runner),
@@ -901,6 +1106,7 @@ class CalibrationPipelineTest(unittest.TestCase):
 
         with (
             patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.BurstEnvelope", SynchronousBurstEnvelope),
             patch("app.ir_calibration.read_window", side_effect=lambda *_args: next(windows)),
             patch("app.ir_calibration.read_saturation_window", side_effect=AssertionError("hold ran")),
             patch("app.ir_calibration.run_margin_test", side_effect=margin_runner),
@@ -929,6 +1135,7 @@ class CalibrationPipelineTest(unittest.TestCase):
 
         with (
             patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.BurstEnvelope", SynchronousBurstEnvelope),
             patch("app.ir_calibration.read_window", side_effect=[unchanged, unchanged]),
             patch("app.ir_calibration.run_margin_test", side_effect=AssertionError("margin ran")),
             patch("app.ir_calibration.run_operational_test", side_effect=AssertionError("operational ran")),

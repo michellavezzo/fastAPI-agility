@@ -378,6 +378,13 @@ class Chronometer:
                     self._calibration_store_path,
                 )
                 return None
+            if not calibration_result_is_valid(data):
+                logging.warning(
+                    "Arquivo de calibracao IR ignorado em %s: recomendacao ausente "
+                    "ou timeout fora do limite de 0.120s.",
+                    self._calibration_store_path,
+                )
+                return None
             return data
         except Exception as exc:
             logging.warning(

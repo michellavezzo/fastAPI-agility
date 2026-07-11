@@ -59,7 +59,8 @@ A fase `active_scan` mantem o comportamento de recuperacao entre frequencias:
 
 1. desliga o emissor;
 2. espera o periodo de recuperacao configurado;
-3. liga a portadora na frequencia candidata;
+3. inicia o envelope de rajadas na frequencia candidata, usando os mesmos
+   tempos ON/OFF do backend;
 4. espera o assentamento;
 5. le o GPIO pela janela configurada;
 6. desliga novamente o emissor.
@@ -73,7 +74,6 @@ Uma frequencia e descartada quando ocorrer qualquer uma destas condicoes:
 - ruido confirmado na janela OFF para o nivel de alinhamento identificado;
 - diferenca entre resposta ativa e resposta OFF inferior a 25 pontos
   percentuais;
-- perda do sinal no teste de saturacao existente;
 - impossibilidade de produzir uma quebra logica no teste automatico;
 - timeout necessario maior que 120 ms.
 
@@ -81,7 +81,6 @@ Cada descarte deve registrar um ou mais codigos estaveis:
 
 - `noise_detected_off`;
 - `insufficient_contrast`;
-- `continuous_signal_suppressed`;
 - `break_not_detected`;
 - `signal_gap_too_large`.
 
@@ -91,9 +90,14 @@ Se todas as frequencias forem descartadas, a calibracao termina com
 
 ### 4. Teste de margem optica
 
-Os cinco candidatos com melhor contraste e estabilidade seguem para a fase
-`margin_test`. Cada um e testado com 100%, 70%, 40% e 20% do duty solicitado
-para a calibracao.
+O teste `hold` de portadora continua permanece como diagnostico da supressao
+interna do receptor. Supressao nesse teste nao descarta uma candidata: o
+hardware de 2026-07-11 mostrou que esse comportamento e esperado e e justamente
+o motivo para operar em rajadas.
+
+Os cinco candidatos com melhor contraste na varredura em rajadas seguem para a
+fase `margin_test`. Cada um e testado, tambem em rajadas, com 100%, 70%, 40% e
+20% do duty solicitado para a calibracao.
 
 O menor duty que ainda mantiver resposta valida vira a metrica
 `minimum_stable_duty`. Ela serve apenas para ordenar frequencias. A recomendacao
@@ -262,4 +266,3 @@ nao reproduz reflexos que possam contornar o objeto real.
 - Vishay TSSP Sensor Kit: https://www.vishay.com/en/doc?80345=
 - Omron Photoelectric Sensors Technical Guide:
   https://www.ia.omron.com/data_pdf/guide/43/photoelectric_tg_e_8_1%28engineering%29.pdf
-

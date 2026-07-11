@@ -177,11 +177,14 @@ ativo menos OFF fica abaixo de `25` pontos percentuais
 (`insufficient_contrast`). O piso de `2 ms` e o contraste mínimo não podem ser
 reduzidos por configuração.
 
-Após o teste de portadora contínua, no máximo cinco finalistas seguem para os
-testes operacionais. O teste de margem mede `100%`, `70%`, `40%` e `20%` do duty
-solicitado e registra o menor valor aprovado em `minimum_stable_duty`; esse
-valor é um indicador prático da margem óptica/elétrica, enquanto a recomendação
-continua operando no duty solicitado. Quando várias candidatas ficam próximas,
+A varredura ativa usa o envelope operacional de `6 ms` ligado e `14 ms`
+desligado. O teste de portadora contínua permanece apenas como diagnóstico do
+tempo de supressão do receptor e não descarta a candidata. No máximo cinco
+finalistas seguem para os testes operacionais. O teste de margem também usa
+rajadas e mede `100%`, `70%`, `40%` e `20%` do duty solicitado, registrando o
+menor valor aprovado em `minimum_stable_duty`; esse valor é um indicador
+prático da margem óptica/elétrica, enquanto a recomendação continua operando no
+duty solicitado. Quando várias candidatas ficam próximas,
 `AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY` participa do desempate depois das
 métricas operacionais.
 
@@ -203,6 +206,8 @@ O resultado inclui os campos `noise_scan`, `rejected`, `margin`, `burst`,
 somente uma tentativa válida atualiza `calibration.last_result`,
 `saved_calibration`, a configuração em runtime e `ir_calibration.json`. Assim,
 uma tentativa inválida preserva a calibração válida anterior.
+Arquivos salvos sem timeout positivo ou com timeout acima de `120 ms` são
+ignorados no startup.
 
 O modo padrão `AGILITY_SENSOR_READ_MODE=auto` tenta usar interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para evitar que cada pulso da rajada seja tratado como largada/chegada. O evento de prova é disparado apenas quando o backend deixa de receber pulsos recentes por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
 

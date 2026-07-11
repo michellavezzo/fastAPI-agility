@@ -311,12 +311,14 @@ O backend:
 3. Pausa emissao IR normal.
 4. Mantem o emissor completamente desligado durante toda a fase `noise_scan` e
    le uma janela temporal para cada posicao da lista de candidatas.
-5. Executa `active_scan`, com recuperacao de `1s` e nova leitura para cada
-   frequencia ativa, pareando-a com a janela OFF da mesma posicao.
-6. Rejeita contaminacao OFF confirmada, contraste insuficiente e perda no teste
-   continuo `hold` de `1s`.
-7. Seleciona no maximo cinco finalistas e executa `margin_test` com quatro niveis
-   de duty.
+5. Executa `active_scan` no envelope operacional de rajadas, com recuperacao de
+   `1s` e nova leitura para cada frequencia, pareando-a com a janela OFF da
+   mesma posicao.
+6. Rejeita contaminacao OFF confirmada e contraste insuficiente. O teste
+   continuo `hold` de `1s` mede quando ocorre supressao, mas nao elimina a
+   candidata.
+7. Seleciona no maximo cinco finalistas pelo contraste da leitura em rajadas e
+   executa `margin_test` com quatro niveis de duty, tambem em rajadas.
 8. Executa `burst_test` no envelope operacional e calcula o timeout dinamico.
 9. Executa `break_test`, desligando eletricamente o emissor e medindo liberacao,
    pulsos residuais e reacquisicao.
@@ -341,16 +343,23 @@ rejeitado com `noise_detected_off` se esse nivel apareceu continuamente durante
 pelo menos `2ms`; esse tempo e um piso e nao pode ser reduzido por configuracao.
 Tambem e exigida diferenca minima de `25` pontos percentuais entre a resposta
 ativa e a resposta OFF. Abaixo desse piso, o motivo e
-`insufficient_contrast`. O teste `hold` continua rejeitando perda por supressao
-de portadora continua com `continuous_signal_suppressed`.
+`insufficient_contrast`.
+
+O teste `hold` continua emitindo portadora sem as pausas do envelope para medir
+o tempo ate a supressao interna do receptor. Essa supressao e registrada em
+`continuous_suppressed_candidates` e
+`continuous_suppression_frequencies`, mas nao e motivo de descarte: um receptor
+demodulado pode rejeitar portadora continua e continuar perfeitamente estavel
+quando acionado em rajadas.
 
 ### Margem de duty, rajada e timeout
 
-Depois dos descartes e do `hold`, no maximo cinco candidatos chegam aos testes
+Depois dos descartes, no maximo cinco candidatos chegam aos testes
 operacionais. Para cada finalista, `margin_test` usa `100%`, `70%`, `40%` e
-`20%` do duty solicitado. Com duty solicitado de `50%`, por exemplo, os testes
-sao feitos em `50%`, `35%`, `20%` e `10%`. O menor valor ainda valido e exposto
-como `minimum_stable_duty`. Ele funciona como indicador pratico da margem
+`20%` do duty solicitado dentro do mesmo envelope de rajadas usado pelo
+backend. Com duty solicitado de `50%`, por exemplo, os testes sao feitos em
+`50%`, `35%`, `20%` e `10%`. O menor valor ainda valido e exposto como
+`minimum_stable_duty`. Ele funciona como indicador pratico da margem
 optica/eletrica e como criterio de ordenacao; a recomendacao continua operando
 com o duty originalmente solicitado.
 
@@ -408,6 +417,27 @@ quando ela termina com `ok=false`. Durante uma nova execucao esse campo volta a
 `calibration.last_result`, `saved_calibration` e `ir_calibration.json`.
 Portanto, tentativa invalida ou excecao nao sobrescreve a ultima calibracao
 valida.
+
+### Evidencia da primeira execucao do novo fluxo - 2026-07-11
+
+A primeira execucao na Raspberry, ainda com a leitura ativa por portadora
+continua, produziu:
+
+- `51` janelas OFF e `51` janelas ativas;
+- nenhum descarte por `noise_detected_off`;
+- `22` frequencias com contraste minimo aprovado;
+- supressao da portadora continua nas 22 frequencias entre aproximadamente
+  `73ms` e `578ms`;
+- zero finalistas, porque a versao inicial tratava essa supressao como falha;
+- preservacao correta do resultado salvo anterior e do runtime em `50000Hz`,
+  rajada `6ms/14ms` e timeout `120ms`.
+
+O resultado demonstrou que a varredura continua media principalmente o AGC e a
+supressao do receptor, nao a operacao real da barreira. A implementacao foi
+entao corrigida para usar rajadas em `active_scan` e `margin_test`, deixando o
+`hold` apenas como diagnostico. O arquivo anterior, que recomendava timeout de
+`360ms`, tambem passou a ser ignorado no startup por exceder o teto atual de
+`120ms`.
 
 ## Interpretacao dos estados
 

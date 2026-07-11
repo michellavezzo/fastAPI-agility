@@ -23,6 +23,28 @@
 - Keep `frequency_hz`, `duty_cycle`, `burst_on`, `burst_off`, `sensor_active_level`, and `sensor_signal_timeout` backward compatible.
 - Automated emitter shutdown does not validate the real optical path; return `physical_break_validated=false`.
 
+## Hardware Validation Amendment - 2026-07-11
+
+The first Raspberry run completed 51 OFF windows and 51 active windows. It
+found 22 candidates with sufficient contrast, but every one suppressed a
+continuous carrier within 0.073 to 0.578 seconds. Rejecting a saturated `hold`
+therefore produced zero finalists even though the runtime `6ms/14ms` barrier
+remained aligned.
+
+The implementation was corrected after this evidence:
+
+- `active_scan` samples each frequency in the configured burst envelope;
+- `margin_test` also samples every duty in that envelope;
+- continuous `hold` suppression remains diagnostic and no longer rejects a
+  candidate;
+- shortlist ranking uses burst-scan contrast and signal percentage, not
+  continuous-hold survival;
+- saved recommendations without a positive timeout at or below `0.120` seconds
+  are ignored at startup.
+
+The original task text below is retained as implementation history; statements
+that reject a saturated hold are superseded by this amendment.
+
 ---
 
 ### Task 1: Pure Sampling, Noise, Margin, and Timeout Metrics

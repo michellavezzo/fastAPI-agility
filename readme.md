@@ -114,13 +114,15 @@ menos `2 ms` com o emissor desligado (`noise_detected_off`) ou se o contraste
 entre as janelas ativa e OFF for menor que `25` pontos percentuais
 (`insufficient_contrast`).
 
-Após o teste de portadora contínua, no máximo cinco finalistas passam pelo teste
-de margem em `100%`, `70%`, `40%` e `20%` do duty solicitado. O menor duty
-aprovado aparece como `minimum_stable_duty`, um indicador prático da margem
-óptica/elétrica; a recomendação continua usando o duty solicitado. Em seguida,
-o teste operacional usa a rajada de `6 ms` ligada e `14 ms` desligada e calcula
-o timeout como `max(3 * period, 2 * max_gap + 5 ms)`. O limite é `120 ms`;
-candidatas que exigirem timeout maior são rejeitadas.
+A varredura ativa usa o mesmo envelope de `6 ms` ligado e `14 ms` desligado do
+backend. A portadora contínua de `1 s` permanece apenas para medir quando o
+receptor suprime o sinal; essa supressão não elimina uma candidata. No máximo
+cinco finalistas passam pelo teste de margem, também em rajadas, a `100%`,
+`70%`, `40%` e `20%` do duty solicitado. O menor duty aprovado aparece como
+`minimum_stable_duty`, um indicador prático da margem óptica/elétrica; a
+recomendação continua usando o duty solicitado. O timeout é calculado como
+`max(3 * period, 2 * max_gap + 5 ms)`. O limite é `120 ms`; candidatas que
+exigirem timeout maior são rejeitadas.
 
 O teste automático de quebra desliga o emissor e verifica liberação e
 reaquisição, mas simula apenas uma interrupção elétrica. Ele não valida a
@@ -129,6 +131,8 @@ expõe `noise_scan`, `rejected`, `margin`, `burst`, `break_tests` e
 `diagnostics`; `calibration.last_attempt` registra também uma tentativa
 inválida. Somente um resultado válido substitui a calibração aplicada e o
 `ir_calibration.json`, portanto uma falha preserva a última calibração válida.
+Arquivos salvos sem timeout positivo ou com timeout acima de `120 ms` são
+ignorados no startup.
 
 `AGILITY_SENSOR_READ_MODE=auto` tenta interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para que as rajadas não gerem falsos eventos.
 No circuito com LED indicador, o LED costuma ficar ligado sem sinal e apagar quando o receptor detecta IR. Nessa montagem, o feixe alinhado normalmente deixa o GPIO em `HIGH`, e o feixe quebrado/sem sinal deixa em `LOW`. Por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`.

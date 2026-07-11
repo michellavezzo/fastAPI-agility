@@ -185,7 +185,7 @@ def main():
             print(f"- {frequency}Hz: {', '.join(item.get('reasons', []))}")
 
     if result["hold"]:
-        print("\nTeste de saturacao com portadora continua:")
+        print("\nTeste de saturacao com portadora continua (diagnostico, nao rejeicao):")
         for item in result["hold"]:
             if item["hold"] is None:
                 continue

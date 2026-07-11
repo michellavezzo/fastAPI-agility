@@ -430,6 +430,28 @@ class BurstEnvelope:
         return bool(self._thread and self._thread.is_alive())
 
 
+def read_burst_window(
+    GPIO,
+    sensor_pin,
+    emitter,
+    frequency,
+    burst_on,
+    burst_off,
+    duration,
+    interval,
+    confirm_time,
+    settle=0.05,
+    window_reader=read_window,
+):
+    envelope = BurstEnvelope(emitter, frequency, burst_on, burst_off)
+    try:
+        envelope.start()
+        time.sleep(settle)
+        return window_reader(GPIO, sensor_pin, duration, interval, confirm_time)
+    finally:
+        envelope.stop()
+
+
 def score_frequency(GPIO, baseline, freq, stats):
     high_delta = stats["high_pct"] - baseline["high_pct"]
     low_delta = stats["low_pct"] - baseline["low_pct"]
@@ -535,6 +557,8 @@ def run_margin_test(
     recovery,
     min_delta,
     confirm_time,
+    burst_on=0.006,
+    burst_off=0.014,
     window_reader=read_window,
 ):
     requested_duty = float(emitter.duty)
@@ -547,9 +571,19 @@ def run_margin_test(
             emitter.off()
             time.sleep(recovery)
             emitter.set_duty(duty)
-            emitter.set_frequency(frequency)
-            time.sleep(settle)
-            stats = window_reader(GPIO, sensor_pin, duration, interval, confirm_time)
+            stats = read_burst_window(
+                GPIO,
+                sensor_pin,
+                emitter,
+                frequency,
+                burst_on,
+                burst_off,
+                duration,
+                interval,
+                confirm_time,
+                settle=settle,
+                window_reader=window_reader,
+            )
             result = evaluate_frequency(
                 GPIO,
                 noise_stats,
@@ -913,24 +947,27 @@ def calibration_result_is_valid(result):
     if not isinstance(result, dict) or result.get("ok") is not True:
         return False
     recommendation = result.get("recommendation")
-    return isinstance(recommendation, dict) and recommendation.get("frequency_hz") is not None
+    if not isinstance(recommendation, dict):
+        return False
+    try:
+        frequency = int(recommendation.get("frequency_hz"))
+        signal_timeout = float(recommendation.get("sensor_signal_timeout"))
+    except (TypeError, ValueError):
+        return False
+    return frequency > 0 and 0 < signal_timeout <= 0.120
 
 
 def _shortlist_key(candidate, preferred_frequency, preference_tolerance):
     scan = candidate["scan"]
-    hold = candidate.get("hold")
-    hold_stability = hold.get("expected_pct", 0.0) if hold is not None else 100.0
     preferred_distance = (
         abs(int(scan["freq"]) - int(preferred_frequency))
         if preferred_frequency is not None
         else 0
     )
     return (
-        -preference_bucket(hold_stability, preference_tolerance),
         -preference_bucket(scan.get("delta", 0.0), preference_tolerance),
         -preference_bucket(scan.get("signal_pct", 0.0), preference_tolerance),
         preferred_distance,
-        -float(hold_stability),
         -float(scan.get("delta", 0.0)),
         -float(scan.get("signal_pct", 0.0)),
     )
@@ -1064,6 +1101,8 @@ def run_ir_calibration(
     effective_sensitivity_delta = max(float(sensitivity_delta), 25.0)
     effective_noise_confirm_time = max(float(noise_confirm_time), 0.002)
     effective_finalist_count = min(5, max(1, int(finalist_count)))
+    effective_burst_on = max(0.0005, float(burst_on))
+    effective_burst_off = max(0.0005, float(burst_off))
     options = {
         "sensor_pin": int(sensor_pin),
         "emitter_pin": int(emitter_pin),
@@ -1086,8 +1125,8 @@ def run_ir_calibration(
         "pwm_backend_requested": normalize_pwm_backend(pwm_backend),
         "pwm_chip": int(pwm_chip),
         "pwm_channel": kernel_pwm_channel_for_pin(emitter_pin, pwm_channel),
-        "burst_on": float(burst_on),
-        "burst_off": float(burst_off),
+        "burst_on": effective_burst_on,
+        "burst_off": effective_burst_off,
         "burst_test_duration": float(burst_test_duration),
         "break_duration": float(break_duration),
         "reacquire_duration": float(reacquire_duration),
@@ -1134,17 +1173,20 @@ def run_ir_calibration(
                 progress({"phase": "active_scan", "frequency_hz": int(freq)})
             emitter.off()
             time.sleep(recovery)
-            emitter.set_frequency(freq)
-            time.sleep(settle)
-            stats = read_window(
+            stats = read_burst_window(
                 GPIO,
                 sensor_pin,
+                emitter,
+                freq,
+                effective_burst_on,
+                effective_burst_off,
                 duration,
                 interval,
                 effective_noise_confirm_time,
+                settle=settle,
+                window_reader=read_window,
             )
             active_results.append((int(freq), stats))
-            emitter.off()
 
         sensitive, rejected = classify_frequency_results(
             GPIO,
@@ -1176,15 +1218,7 @@ def run_ir_calibration(
                 emitter.off()
             hold_item = {"scan": scan, "hold": hold}
             hold_results.append(hold_item)
-            if hold is not None and hold["saturated"]:
-                rejected.append({
-                    **scan,
-                    "hold": hold,
-                    "valid": False,
-                    "reasons": ["continuous_signal_suppressed"],
-                })
-            else:
-                shortlist_pool.append(hold_item)
+            shortlist_pool.append(hold_item)
 
         shortlist = sorted(
             shortlist_pool,
@@ -1216,6 +1250,8 @@ def run_ir_calibration(
                 recovery,
                 effective_sensitivity_delta,
                 effective_noise_confirm_time,
+                effective_burst_on,
+                effective_burst_off,
             )
             margin_entry = {"freq": int(freq), **margin_result}
             margin_results.append(margin_entry)
@@ -1234,8 +1270,8 @@ def run_ir_calibration(
                     sensor_pin,
                     emitter,
                     scan,
-                    burst_on,
-                    burst_off,
+                    effective_burst_on,
+                    effective_burst_off,
                     burst_test_duration,
                     break_duration,
                     reacquire_duration,
@@ -1302,8 +1338,8 @@ def run_ir_calibration(
             duty,
             baseline,
             selected,
-            burst_on,
-            burst_off,
+            effective_burst_on,
+            effective_burst_off,
         )
         if recommendation is not None:
             recommendation["pwm_backend"] = emitter.active_backend
@@ -1322,6 +1358,15 @@ def run_ir_calibration(
             "valid_candidates": sum(item["valid"] for item in finalist_results),
             "rejected_candidates": len(rejected),
             "reason_counts": reason_counts,
+            "continuous_suppressed_candidates": sum(
+                bool(item.get("hold") and item["hold"].get("saturated"))
+                for item in hold_results
+            ),
+            "continuous_suppression_frequencies": [
+                int(item["scan"]["freq"])
+                for item in hold_results
+                if item.get("hold") and item["hold"].get("saturated")
+            ],
             "finalist_results": finalist_results,
             "physical_break_validated": False,
             "physical_validation_warning": (
