@@ -69,6 +69,16 @@ def print_recommendation(result):
                 "com portadora continua."
             )
     print(f"- Backend PWM usado no teste: {recommendation['pwm_backend']}.")
+    print(
+        f"- Margem: duty minimo estavel {recommendation['minimum_stable_duty']:.1f}%; "
+        f"maior lacuna em rajada {recommendation['burst_max_signal_gap']:.3f}s."
+    )
+    print(
+        f"- Temporizacao: liberacao {recommendation['break_release_s']:.3f}s; "
+        f"reaquisicao {recommendation['reacquire_s']:.3f}s."
+    )
+    if not recommendation.get("physical_break_validated", False):
+        print("- AVISO: a interrupcao foi simulada; valide uma quebra fisica do feixe antes da prova.")
     print("- Configuracao recomendada para o backend:")
     for line in format_export_lines(recommendation):
         print(f"  {line}")
@@ -140,6 +150,14 @@ def main():
             pwm_backend=args.pwm_backend,
             pwm_chip=args.pwm_chip,
             pwm_channel=args.pwm_channel,
+            noise_confirm_time=args.noise_confirm_time,
+            finalist_count=args.finalist_count,
+            burst_on=args.burst_on,
+            burst_off=args.burst_off,
+            burst_test_duration=args.burst_test_duration,
+            break_duration=args.break_duration,
+            reacquire_duration=args.reacquire_duration,
+            max_signal_timeout=args.max_signal_timeout,
         )
     except CalibrationError as exc:
         print(f"ERRO: {exc}")
@@ -152,17 +170,51 @@ def main():
         return 0
 
     print_stats("OFF", result["baseline"])
+    if result["noise_scan"]:
+        print("\nJanelas temporais com emissor desligado:")
+        for item in result["noise_scan"]:
+            print_stats(f"OFF#{item['window_index']}", item["stats"])
     for item in result["scan"]:
         print_stats(f"{item['freq']}Hz", item["stats"])
+
+    if result["rejected"]:
+        print("\nRejeicoes:")
+        for item in result["rejected"]:
+            scan = item.get("scan", item)
+            frequency = scan.get("freq", scan.get("candidate_frequency_hz", "?"))
+            print(f"- {frequency}Hz: {', '.join(item.get('reasons', []))}")
 
     if result["hold"]:
         print("\nTeste de saturacao com portadora continua:")
         for item in result["hold"]:
+            if item["hold"] is None:
+                continue
             print_hold_stats(
                 f"{item['scan']['freq']}Hz",
                 item["scan"]["signal_level_name"],
                 item["hold"],
                 args.hold_duration,
+            )
+
+    if result["margin"]:
+        print("\nMargem de duty:")
+        for item in result["margin"]:
+            minimum = item["minimum_stable_duty"]
+            value = f"{minimum:.1f}%" if minimum is not None else "sem duty estavel"
+            print(f"- {item['freq']}Hz: {value}")
+
+    break_by_frequency = {item["freq"]: item for item in result["break_tests"]}
+    if result["burst"]:
+        print("\nRajada e interrupcao simulada:")
+        for item in result["burst"]:
+            break_test = break_by_frequency[item["freq"]]
+            release = break_test["break_release_s"]
+            reacquire = break_test["reacquire_s"]
+            release_text = f"{release:.3f}s" if release is not None else "nao detectada"
+            reacquire_text = f"{reacquire:.3f}s" if reacquire is not None else "nao detectada"
+            print(
+                f"- {item['freq']}Hz: lacuna {item['max_signal_gap']:.3f}s; "
+                f"liberacao {release_text}; reaquisicao {reacquire_text}"
             )
 
     print_recommendation(result)

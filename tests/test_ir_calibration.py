@@ -3,6 +3,7 @@ import time
 import unittest
 from unittest.mock import call, patch
 
+import app.ir_calibration as calibration
 from app.ir_calibration import (
     BurstEnvelope,
     CalibrationError,
@@ -20,6 +21,48 @@ from app.ir_calibration import (
 class FakeGPIO:
     LOW = 0
     HIGH = 1
+    BCM = 11
+    IN = 1
+    PUD_UP = 22
+
+    @staticmethod
+    def setwarnings(_enabled):
+        pass
+
+    @staticmethod
+    def setmode(_mode):
+        pass
+
+    @staticmethod
+    def setup(_pin, _mode, pull_up_down=None):
+        pass
+
+
+class PipelineEmitter:
+    def __init__(self, events):
+        self.events = events
+        self.duty = 50.0
+        self.active = False
+        self.active_backend = "fake.PWM"
+
+    def setup(self):
+        self.events.append(("setup",))
+
+    def set_duty(self, duty):
+        self.duty = float(duty)
+        self.events.append(("duty", self.duty))
+
+    def set_frequency(self, frequency):
+        self.active = True
+        self.events.append(("on", int(frequency), self.duty))
+
+    def off(self):
+        self.active = False
+        self.events.append(("off",))
+
+    def cleanup(self):
+        self.active = False
+        self.events.append(("cleanup",))
 
 
 class FakeEmitter:
@@ -515,7 +558,7 @@ class CalibrationMetricsTest(unittest.TestCase):
             FakeGPIO, noise, active, 5.0, 0.002
         )
         self.assertEqual(sensitive, [])
-        self.assertEqual(rejected[0]["reasons"], ["insufficient_delta"])
+        self.assertEqual(rejected[0]["reasons"], ["insufficient_contrast"])
 
     def test_noise_confirmation_floor_ignores_one_millisecond_run(self):
         noise = [{
@@ -585,3 +628,253 @@ class CalibrationMetricsTest(unittest.TestCase):
         result = calculate_signal_timeout(0.006, 0.014, 0.070, max_timeout=0.2)
         self.assertEqual(result["signal_timeout"], 0.145)
         self.assertFalse(result["valid"])
+
+
+class CalibrationPipelineTest(unittest.TestCase):
+    @staticmethod
+    def candidate_result(freq, minimum_stable_duty):
+        return {
+            "scan": {"freq": freq, "delta": 100.0, "signal_pct": 100.0},
+            "margin": {"minimum_stable_duty": minimum_stable_duty},
+            "burst": {"max_signal_gap": 0.020},
+            "break_test": {
+                "break_detected": True,
+                "break_release_s": 0.0,
+                "reacquire_s": 0.005,
+            },
+            "signal_timeout": 0.060,
+            "valid": True,
+            "reasons": [],
+        }
+
+    def test_candidate_ranking_prefers_lower_stable_duty_before_frequency_preference(self):
+        candidates = [
+            self.candidate_result(50000, minimum_stable_duty=35.0),
+            self.candidate_result(48000, minimum_stable_duty=20.0),
+        ]
+
+        selected = calibration.choose_operational_candidate(
+            candidates,
+            preferred_frequency=50000,
+        )
+
+        self.assertEqual(selected["scan"]["freq"], 48000)
+
+    def test_failed_attempt_is_not_persistable(self):
+        self.assertFalse(
+            calibration.calibration_result_is_valid({"ok": False, "recommendation": None})
+        )
+
+    def test_cli_accepts_multi_phase_timing_and_finalist_controls(self):
+        args = calibration.build_arg_parser().parse_args([
+            "--noise-confirm-time", "0.003",
+            "--finalist-count", "3",
+            "--burst-on", "0.007",
+            "--burst-off", "0.015",
+            "--burst-test-duration", "1.2",
+            "--break-duration", "0.3",
+            "--reacquire-duration", "0.6",
+            "--max-signal-timeout", "0.1",
+        ])
+
+        self.assertEqual(args.noise_confirm_time, 0.003)
+        self.assertEqual(args.finalist_count, 3)
+        self.assertEqual(args.burst_on, 0.007)
+        self.assertEqual(args.burst_off, 0.015)
+        self.assertEqual(args.burst_test_duration, 1.2)
+        self.assertEqual(args.break_duration, 0.3)
+        self.assertEqual(args.reacquire_duration, 0.6)
+        self.assertEqual(args.max_signal_timeout, 0.1)
+        self.assertTrue(
+            calibration.calibration_result_is_valid(
+                {"ok": True, "recommendation": {"frequency_hz": 50000}}
+            )
+        )
+
+    def test_pipeline_reads_all_off_windows_first_and_only_tests_clean_finalists(self):
+        events = []
+        emitter = PipelineEmitter(events)
+        frequencies = [38000, 40000, 42000, 50000]
+        noise_stats = [
+            summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0, 1, 1, 1, 0], 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002),
+        ]
+        active_stats = [
+            summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [1, 0, 0, 0, 0], 0.001, 0.002),
+            summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002),
+        ]
+        windows = iter(noise_stats + active_stats)
+        margin_frequencies = []
+        operational_frequencies = []
+        progress_phases = []
+
+        def window_reader(*_args, **_kwargs):
+            events.append(("read_active" if emitter.active else "read_off",))
+            return next(windows)
+
+        def hold_reader(_GPIO, _pin, _level, _duration, _interval, _gap):
+            frequency = events[-1][1] if events[-1][0] == "on" else None
+            saturated = frequency == 38000
+            return {
+                "samples": 5,
+                "expected_pct": 100.0,
+                "expected_samples": 5,
+                "high": 5,
+                "low": 0,
+                "high_pct": 100.0,
+                "low_pct": 0.0,
+                "transitions": 0,
+                "first": 1,
+                "last": 1,
+                "first_expected_at": 0.0,
+                "last_expected_at": 0.004,
+                "lost_after": 0.001 if saturated else None,
+                "saturated": saturated,
+            }
+
+        def margin_runner(_GPIO, _pin, _emitter, scan, *_args, **_kwargs):
+            margin_frequencies.append(scan["freq"])
+            return {
+                "requested_duty": 50.0,
+                "minimum_stable_duty": 20.0,
+                "results": [{"duty": 20.0, "valid": True}],
+            }
+
+        def operational_runner(_GPIO, _pin, _emitter, scan, *_args, **_kwargs):
+            operational_frequencies.append(scan["freq"])
+            _kwargs["progress"]({"phase": "break_test", "frequency_hz": scan["freq"]})
+            return self.operational_result()
+
+        with (
+            patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.read_window", side_effect=window_reader),
+            patch("app.ir_calibration.read_saturation_window", side_effect=hold_reader),
+            patch("app.ir_calibration.run_margin_test", side_effect=margin_runner),
+            patch("app.ir_calibration.run_operational_test", side_effect=operational_runner),
+        ):
+            result = calibration.run_ir_calibration(
+                FakeGPIO,
+                freqs=frequencies,
+                duration=0,
+                settle=0,
+                recovery=0,
+                hold_duration=0,
+                progress=lambda update: progress_phases.append(update["phase"]),
+            )
+
+        first_active = next(index for index, event in enumerate(events) if event[0] == "on")
+        self.assertEqual(
+            [event for event in events[:first_active] if event[0].startswith("read_")],
+            [("read_off",)] * len(frequencies),
+        )
+        self.assertEqual(margin_frequencies, [50000])
+        self.assertEqual(operational_frequencies, [50000])
+        self.assertEqual(result["recommendation"]["frequency_hz"], 50000)
+        self.assertEqual(result["recommendation"]["burst_on"], 0.006)
+        self.assertEqual(result["recommendation"]["burst_off"], 0.014)
+        self.assertEqual(result["recommendation"]["sensor_signal_timeout"], 0.060)
+        self.assertEqual(result["recommendation"]["minimum_stable_duty"], 20.0)
+        ordered_phases = [
+            "noise_scan",
+            "active_scan",
+            "hold",
+            "margin_test",
+            "burst_test",
+            "break_test",
+            "select",
+        ]
+        first_phase_positions = [progress_phases.index(phase) for phase in ordered_phases]
+        self.assertEqual(first_phase_positions, sorted(first_phase_positions))
+        self.assertTrue(
+            {"noise_scan", "rejected", "margin", "burst", "break_tests", "diagnostics"}
+            <= result.keys()
+        )
+        self.assertEqual(len(result["diagnostics"]["finalist_results"]), 1)
+        self.assertFalse(result["diagnostics"]["physical_break_validated"])
+
+    def test_clean_candidates_still_reach_operational_tests_when_hold_is_skipped(self):
+        events = []
+        emitter = PipelineEmitter(events)
+        windows = iter([
+            summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002),
+        ])
+        tested = []
+
+        def margin_runner(_GPIO, _pin, _emitter, scan, *_args, **_kwargs):
+            tested.append(("margin", scan["freq"]))
+            return {
+                "requested_duty": 50.0,
+                "minimum_stable_duty": 20.0,
+                "results": [{"duty": 20.0, "valid": True}],
+            }
+
+        def operational_runner(_GPIO, _pin, _emitter, scan, *_args, **_kwargs):
+            tested.append(("operational", scan["freq"]))
+            return self.operational_result()
+
+        with (
+            patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.read_window", side_effect=lambda *_args: next(windows)),
+            patch("app.ir_calibration.read_saturation_window", side_effect=AssertionError("hold ran")),
+            patch("app.ir_calibration.run_margin_test", side_effect=margin_runner),
+            patch("app.ir_calibration.run_operational_test", side_effect=operational_runner),
+        ):
+            result = calibration.run_ir_calibration(
+                FakeGPIO,
+                freqs=[50000],
+                duration=0,
+                settle=0,
+                recovery=0,
+                skip_hold=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(tested, [("margin", 50000), ("operational", 50000)])
+
+    def test_no_candidate_returns_diagnostics_without_recommendation(self):
+        events = []
+        emitter = PipelineEmitter(events)
+        unchanged = summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002)
+
+        with (
+            patch("app.ir_calibration.Emitter", return_value=emitter),
+            patch("app.ir_calibration.read_window", side_effect=[unchanged, unchanged]),
+            patch("app.ir_calibration.run_margin_test", side_effect=AssertionError("margin ran")),
+            patch("app.ir_calibration.run_operational_test", side_effect=AssertionError("operational ran")),
+        ):
+            result = calibration.run_ir_calibration(
+                FakeGPIO,
+                freqs=[50000],
+                duration=0,
+                settle=0,
+                recovery=0,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["recommendation"])
+        self.assertEqual(result["diagnostics"]["valid_candidates"], 0)
+
+    @staticmethod
+    def operational_result():
+        active = summarize_samples(FakeGPIO, [1] * 5, 0.001, 0.002)
+        broken = summarize_samples(FakeGPIO, [0] * 5, 0.001, 0.002)
+        return {
+            "active": active,
+            "break": broken,
+            "reacquire": active,
+            "active_max_gap_s": 0.020,
+            "signal_timeout": 0.060,
+            "timeout_valid": True,
+            "timeout_reason": None,
+            "break_detected": True,
+            "break_release_s": 0.0,
+            "break_run_s": 0.250,
+            "residual_signal_samples": 0,
+            "reacquire_s": 0.005,
+            "reacquired": True,
+        }

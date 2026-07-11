@@ -14,6 +14,7 @@ from .ir_calibration import (
     CalibrationError,
     HARDWARE_PWM_PINS,
     KernelSysfsPWM,
+    calibration_result_is_valid,
     kernel_pwm_channel_for_pin,
     normalize_pwm_backend,
     run_ir_calibration,
@@ -287,6 +288,7 @@ class Chronometer:
             "started_at": None,
             "finished_at": None,
             "error": None,
+            "last_attempt": None,
             "last_result": self._calibration_last_result,
             "store_path": str(self._calibration_store_path),
         }
@@ -1215,12 +1217,14 @@ class Chronometer:
                     "finished_at": None,
                     "trigger": trigger,
                     "error": None,
+                    "last_attempt": None,
                 }
             )
             self._mark_state_changed_locked()
 
     def _mark_calibration_finished(self, result=None, error=None):
         now = datetime.now().isoformat()
+        valid = calibration_result_is_valid(result)
         with self._lock:
             self._calibration_running = False
             self._calibration_status.update(
@@ -1233,8 +1237,10 @@ class Chronometer:
                 }
             )
             if result is not None:
-                self._calibration_last_result = result
-                self._calibration_status["last_result"] = result
+                self._calibration_status["last_attempt"] = result
+                if valid:
+                    self._calibration_last_result = result
+                    self._calibration_status["last_result"] = result
             self._mark_state_changed_locked()
 
     def calibrate_ir_sensor(self, apply=True, save=True, trigger="manual"):
@@ -1278,15 +1284,19 @@ class Chronometer:
                     pwm_chip=self.ir_pwm_chip,
                     pwm_channel=self.ir_pwm_channel,
                     progress=self._set_calibration_progress,
+                    burst_on=self.ir_burst_on_time,
+                    burst_off=self.ir_burst_off_time,
+                    max_signal_timeout=self.sensor_signal_timeout,
                 )
                 recommendation = result.get("recommendation")
-                if apply and recommendation:
+                valid = calibration_result_is_valid(result)
+                if apply and valid:
                     self._apply_ir_recommendation(
                         recommendation,
                         override_env=True,
                         source=f"calibracao {trigger}",
                     )
-                if save:
+                if save and valid:
                     self._save_ir_calibration_file(result)
                 self._mark_calibration_finished(result=result)
                 logging.info(

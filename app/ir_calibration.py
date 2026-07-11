@@ -463,7 +463,7 @@ def evaluate_frequency(GPIO, noise_stats, freq, active_stats, min_delta, noise_c
     )
     reasons = []
     if scored["delta"] < effective_min_delta:
-        reasons.append("insufficient_delta")
+        reasons.append("insufficient_contrast")
     if noise_longest_run_s >= effective_noise_confirm_time:
         reasons.append("noise_detected_off")
 
@@ -593,6 +593,7 @@ def run_operational_test(
     max_signal_timeout,
     settle=0.05,
     window_reader=read_window,
+    progress=None,
 ):
     signal_level = int(scan["signal_level"])
     break_level = opposite_level(GPIO, signal_level)
@@ -618,6 +619,8 @@ def run_operational_test(
             max_signal_timeout,
         )
 
+        if progress:
+            progress({"phase": "break_test", "frequency_hz": int(scan["freq"])})
         broken = window_reader(
             GPIO,
             sensor_pin,
@@ -875,6 +878,104 @@ def build_recommendation(
     }
 
 
+def _ascending_metric(value):
+    if value is None:
+        return (1, math.inf)
+    return (0, float(value))
+
+
+def choose_operational_candidate(candidates, preferred_frequency=None):
+    valid_candidates = [candidate for candidate in candidates if candidate.get("valid", True)]
+
+    def rank(candidate):
+        scan = candidate.get("scan") or {}
+        margin = candidate.get("margin") or {}
+        burst = candidate.get("burst") or {}
+        break_test = candidate.get("break_test") or {}
+        preferred_distance = (
+            abs(int(scan.get("freq", 0)) - int(preferred_frequency))
+            if preferred_frequency is not None
+            else 0
+        )
+        return (
+            _ascending_metric(margin.get("minimum_stable_duty")),
+            _ascending_metric(burst.get("max_signal_gap")),
+            _ascending_metric(break_test.get("break_release_s")),
+            _ascending_metric(break_test.get("reacquire_s")),
+            -float(scan.get("delta", -math.inf)),
+            preferred_distance,
+        )
+
+    return min(valid_candidates, key=rank, default=None)
+
+
+def calibration_result_is_valid(result):
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return False
+    recommendation = result.get("recommendation")
+    return isinstance(recommendation, dict) and recommendation.get("frequency_hz") is not None
+
+
+def _shortlist_key(candidate, preferred_frequency):
+    scan = candidate["scan"]
+    hold = candidate.get("hold")
+    hold_stability = hold.get("expected_pct", 0.0) if hold is not None else 100.0
+    preferred_distance = (
+        abs(int(scan["freq"]) - int(preferred_frequency))
+        if preferred_frequency is not None
+        else 0
+    )
+    return (
+        -float(hold_stability),
+        -float(scan.get("delta", 0.0)),
+        -float(scan.get("signal_pct", 0.0)),
+        preferred_distance,
+    )
+
+
+def _build_operational_recommendation(
+    GPIO,
+    duty,
+    baseline,
+    selected,
+    burst_on,
+    burst_off,
+):
+    if selected is None:
+        return None
+
+    scan = selected["scan"]
+    signal_level = scan["signal_level"]
+    break_level = opposite_level(GPIO, signal_level)
+    break_test = selected["break_test"]
+    margin = selected["margin"]
+    recommendation = {
+        "frequency_hz": int(scan["freq"]),
+        "duty_cycle": float(duty),
+        "burst_enabled": True,
+        "burst_on": round(float(burst_on), 6),
+        "burst_off": round(float(burst_off), 6),
+        "sensor_active_level": "LOW" if break_level == GPIO.LOW else "HIGH",
+        "sensor_signal_timeout": round(float(selected["signal_timeout"]), 6),
+        "sensor_trigger_confirm": 0.002,
+        "sensor_ready_min_ratio": 0.2,
+        "aligned_level": int(signal_level),
+        "aligned_level_name": level_name(GPIO, signal_level),
+        "break_level": int(break_level),
+        "break_level_name": level_name(GPIO, break_level),
+        "baseline_signal_pct": round(level_pct(GPIO, baseline, signal_level), 3),
+        "scan_signal_pct": scan["signal_pct"],
+        "scan_delta": scan["delta"],
+        "saturation": selected.get("hold"),
+        "minimum_stable_duty": margin["minimum_stable_duty"],
+        "burst_max_signal_gap": selected["burst"]["max_signal_gap"],
+        "break_release_s": break_test["break_release_s"],
+        "reacquire_s": break_test["reacquire_s"],
+        "physical_break_validated": False,
+    }
+    return recommendation
+
+
 def format_export_lines(recommendation):
     if not recommendation:
         return []
@@ -929,6 +1030,14 @@ def run_ir_calibration(
     pwm_chip=0,
     pwm_channel=None,
     progress=None,
+    noise_confirm_time=0.002,
+    finalist_count=5,
+    burst_on=0.006,
+    burst_off=0.014,
+    burst_test_duration=1.0,
+    break_duration=0.25,
+    reacquire_duration=0.5,
+    max_signal_timeout=0.12,
 ):
     if GPIO is None:
         raise CalibrationError("RPi.GPIO indisponivel")
@@ -949,6 +1058,9 @@ def run_ir_calibration(
     )
     emitter.setup()
 
+    effective_sensitivity_delta = max(float(sensitivity_delta), 25.0)
+    effective_noise_confirm_time = max(float(noise_confirm_time), 0.002)
+    effective_finalist_count = max(1, int(finalist_count))
     options = {
         "sensor_pin": int(sensor_pin),
         "emitter_pin": int(emitter_pin),
@@ -960,7 +1072,9 @@ def run_ir_calibration(
         "start": int(start),
         "stop": int(stop),
         "step": int(step),
-        "sensitivity_delta": float(sensitivity_delta),
+        "sensitivity_delta": effective_sensitivity_delta,
+        "noise_confirm_time": effective_noise_confirm_time,
+        "finalist_count": effective_finalist_count,
         "hold_duration": float(hold_duration),
         "saturation_gap": float(saturation_gap),
         "skip_hold": bool(skip_hold),
@@ -969,35 +1083,81 @@ def run_ir_calibration(
         "pwm_backend_requested": normalize_pwm_backend(pwm_backend),
         "pwm_chip": int(pwm_chip),
         "pwm_channel": kernel_pwm_channel_for_pin(emitter_pin, pwm_channel),
+        "burst_on": float(burst_on),
+        "burst_off": float(burst_off),
+        "burst_test_duration": float(burst_test_duration),
+        "break_duration": float(break_duration),
+        "reacquire_duration": float(reacquire_duration),
+        "max_signal_timeout": min(float(max_signal_timeout), 0.120),
         "frequencies": frequency_list(start, stop, step, freqs),
     }
 
     try:
-        if progress:
-            progress({"phase": "baseline", "message": "lendo sensor com emissor desligado"})
         emitter.off()
         time.sleep(recovery)
-        baseline = read_window(GPIO, sensor_pin, duration, interval)
+        noise_scan = []
+        for window_index, freq in enumerate(options["frequencies"]):
+            if progress:
+                progress({"phase": "noise_scan", "frequency_hz": int(freq)})
+            stats = read_window(
+                GPIO,
+                sensor_pin,
+                duration,
+                interval,
+                effective_noise_confirm_time,
+            )
+            noise_scan.append({
+                "window_index": int(window_index),
+                "candidate_frequency_hz": int(freq),
+                "stats": stats,
+            })
 
-        results = []
+        if noise_scan:
+            first_noise_stats = noise_scan[0]["stats"]
+        else:
+            if progress:
+                progress({"phase": "noise_scan", "message": "lendo emissor desligado"})
+            first_noise_stats = read_window(
+                GPIO,
+                sensor_pin,
+                duration,
+                interval,
+                effective_noise_confirm_time,
+            )
+
+        active_results = []
         for freq in options["frequencies"]:
             if progress:
-                progress({"phase": "scan", "frequency_hz": int(freq)})
+                progress({"phase": "active_scan", "frequency_hz": int(freq)})
             emitter.off()
             time.sleep(recovery)
             emitter.set_frequency(freq)
             time.sleep(settle)
-            stats = read_window(GPIO, sensor_pin, duration, interval)
-            results.append((freq, stats))
+            stats = read_window(
+                GPIO,
+                sensor_pin,
+                duration,
+                interval,
+                effective_noise_confirm_time,
+            )
+            active_results.append((int(freq), stats))
             emitter.off()
 
-        sensitive = find_sensitive_frequencies(GPIO, baseline, results, sensitivity_delta)
+        sensitive, rejected = classify_frequency_results(
+            GPIO,
+            noise_scan,
+            active_results,
+            effective_sensitivity_delta,
+            effective_noise_confirm_time,
+        )
         hold_results = []
-        if sensitive and not skip_hold:
-            for scan in sensitive:
-                freq = scan["freq"]
-                if progress:
-                    progress({"phase": "hold", "frequency_hz": int(freq)})
+        shortlist_pool = []
+        for scan in sensitive:
+            freq = scan["freq"]
+            if progress:
+                progress({"phase": "hold", "frequency_hz": int(freq)})
+            hold = None
+            if not skip_hold:
                 emitter.off()
                 time.sleep(recovery)
                 emitter.set_frequency(freq)
@@ -1010,29 +1170,161 @@ def run_ir_calibration(
                     interval,
                     saturation_gap,
                 )
-                hold_results.append({"scan": scan, "hold": hold})
-            emitter.off()
+                emitter.off()
+            hold_item = {"scan": scan, "hold": hold}
+            hold_results.append(hold_item)
+            if hold is not None and hold["saturated"]:
+                rejected.append({
+                    **scan,
+                    "hold": hold,
+                    "valid": False,
+                    "reasons": ["continuous_signal_suppressed"],
+                })
+            else:
+                shortlist_pool.append(hold_item)
 
-        recommendation = build_recommendation(
+        shortlist = sorted(
+            shortlist_pool,
+            key=lambda item: _shortlist_key(item, preferred_frequency),
+        )[:effective_finalist_count]
+
+        margin_results = []
+        burst_results = []
+        break_tests = []
+        finalist_results = []
+        for finalist in shortlist:
+            scan = finalist["scan"]
+            freq = scan["freq"]
+            if progress:
+                progress({"phase": "margin_test", "frequency_hz": int(freq)})
+            margin_result = run_margin_test(
+                GPIO,
+                sensor_pin,
+                emitter,
+                scan,
+                scan["noise_stats"],
+                duration,
+                interval,
+                settle,
+                recovery,
+                effective_sensitivity_delta,
+                effective_noise_confirm_time,
+            )
+            margin_entry = {"freq": int(freq), **margin_result}
+            margin_results.append(margin_entry)
+            reasons = []
+            burst_entry = None
+            break_entry = None
+            signal_timeout = None
+
+            if margin_result["minimum_stable_duty"] is None:
+                reasons.append("insufficient_contrast")
+            else:
+                if progress:
+                    progress({"phase": "burst_test", "frequency_hz": int(freq)})
+                operational = run_operational_test(
+                    GPIO,
+                    sensor_pin,
+                    emitter,
+                    scan,
+                    burst_on,
+                    burst_off,
+                    burst_test_duration,
+                    break_duration,
+                    reacquire_duration,
+                    interval,
+                    effective_noise_confirm_time,
+                    max_signal_timeout,
+                    settle=settle,
+                    progress=progress,
+                )
+                signal_timeout = operational["signal_timeout"]
+                burst_entry = {
+                    "freq": int(freq),
+                    "max_signal_gap": operational["active_max_gap_s"],
+                    "stats": operational["active"],
+                }
+                break_entry = {
+                    "freq": int(freq),
+                    "break_detected": operational["break_detected"],
+                    "break_release_s": operational["break_release_s"],
+                    "break_run_s": operational["break_run_s"],
+                    "residual_signal_samples": operational["residual_signal_samples"],
+                    "reacquire_s": operational["reacquire_s"],
+                    "reacquired": operational["reacquired"],
+                    "timeout": signal_timeout,
+                    "signal_timeout": signal_timeout,
+                    "timeout_valid": operational["timeout_valid"],
+                }
+                burst_results.append(burst_entry)
+                break_tests.append(break_entry)
+                if not operational["timeout_valid"]:
+                    reasons.append("signal_gap_too_large")
+                if not operational["break_detected"] or not operational["reacquired"]:
+                    reasons.append("break_not_detected")
+
+            candidate = {
+                "scan": scan,
+                "hold": finalist["hold"],
+                "margin": margin_entry,
+                "burst": burst_entry,
+                "break_test": break_entry,
+                "signal_timeout": signal_timeout,
+                "valid": not reasons,
+                "reasons": reasons,
+            }
+            finalist_results.append(candidate)
+            if reasons:
+                rejected.append({
+                    **scan,
+                    "hold": finalist["hold"],
+                    "margin": margin_entry,
+                    "burst": burst_entry,
+                    "break_test": break_entry,
+                    "signal_timeout": signal_timeout,
+                    "valid": False,
+                    "reasons": reasons,
+                })
+
+        if progress:
+            progress({"phase": "select", "frequency_hz": None})
+        selected = choose_operational_candidate(finalist_results, preferred_frequency)
+        baseline = selected["scan"]["noise_stats"] if selected is not None else first_noise_stats
+        recommendation = _build_operational_recommendation(
             GPIO,
             duty,
             baseline,
-            sensitive,
-            hold_results,
-            preferred_frequency=preferred_frequency,
-            preference_tolerance=preference_tolerance,
+            selected,
+            burst_on,
+            burst_off,
         )
         if recommendation is not None:
             recommendation["pwm_backend"] = emitter.active_backend
             recommendation["pwm_backend_env"] = backend_env_name(emitter.active_backend)
             recommendation["exports"] = format_export_lines(recommendation)
 
+        reason_counts = {}
+        for item in rejected:
+            for reason in item.get("reasons", []):
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        diagnostics = {
+            "noise_windows": len(noise_scan),
+            "active_scans": len(active_results),
+            "sensitive_candidates": len(sensitive),
+            "finalists": len(finalist_results),
+            "valid_candidates": sum(item["valid"] for item in finalist_results),
+            "rejected_candidates": len(rejected),
+            "reason_counts": reason_counts,
+            "finalist_results": finalist_results,
+            "physical_break_validated": False,
+            "physical_validation_warning": (
+                "A interrupcao foi simulada; valide uma quebra fisica do feixe antes da prova."
+            ),
+        }
+
         scan_results = [
-            {
-                "freq": int(freq),
-                "stats": stats,
-            }
-            for freq, stats in results
+            {"freq": int(freq), "stats": stats}
+            for freq, stats in active_results
         ]
         finished_at = datetime.now().isoformat()
         duration_s = time.perf_counter() - started_perf
@@ -1048,6 +1340,12 @@ def run_ir_calibration(
             "sensitive": sensitive,
             "hold": hold_results,
             "recommendation": recommendation,
+            "noise_scan": noise_scan,
+            "rejected": rejected,
+            "margin": margin_results,
+            "burst": burst_results,
+            "break_tests": break_tests,
+            "diagnostics": diagnostics,
         }
     finally:
         emitter.cleanup()
@@ -1083,6 +1381,18 @@ def build_arg_parser():
         help="Mudanca minima em pontos percentuais para considerar uma frequencia sensivel.",
     )
     parser.add_argument(
+        "--noise-confirm-time",
+        type=float,
+        default=0.002,
+        help="Tempo minimo de sinal continuo para marcar contaminacao com emissor desligado.",
+    )
+    parser.add_argument(
+        "--finalist-count",
+        type=int,
+        default=5,
+        help="Numero maximo de candidatos limpos submetidos aos testes operacionais.",
+    )
+    parser.add_argument(
         "--hold-duration",
         type=float,
         default=1.0,
@@ -1098,6 +1408,42 @@ def build_arg_parser():
         "--skip-hold",
         action="store_true",
         help="Nao executa o teste de saturacao de 1s nas frequencias sensiveis.",
+    )
+    parser.add_argument(
+        "--burst-on",
+        type=float,
+        default=0.006,
+        help="Tempo ligado de cada rajada IR em segundos.",
+    )
+    parser.add_argument(
+        "--burst-off",
+        type=float,
+        default=0.014,
+        help="Tempo desligado entre rajadas IR em segundos.",
+    )
+    parser.add_argument(
+        "--burst-test-duration",
+        type=float,
+        default=1.0,
+        help="Duracao do teste ativo em rajadas.",
+    )
+    parser.add_argument(
+        "--break-duration",
+        type=float,
+        default=0.250,
+        help="Duracao da interrupcao simulada do feixe.",
+    )
+    parser.add_argument(
+        "--reacquire-duration",
+        type=float,
+        default=0.500,
+        help="Janela para medir a recuperacao do sinal depois da interrupcao.",
+    )
+    parser.add_argument(
+        "--max-signal-timeout",
+        type=float,
+        default=0.120,
+        help="Maior timeout de sinal permitido; o teto de seguranca e 0.120s.",
     )
     parser.add_argument(
         "--freqs",
