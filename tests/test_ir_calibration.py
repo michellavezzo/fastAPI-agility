@@ -1,11 +1,15 @@
+import time
 import unittest
 
 from app.ir_calibration import (
+    BurstEnvelope,
     CalibrationError,
     calculate_signal_timeout,
     classify_frequency_results,
     margin_duty_values,
     minimum_stable_duty,
+    run_margin_test,
+    run_operational_test,
     summarize_samples,
 )
 
@@ -13,6 +17,93 @@ from app.ir_calibration import (
 class FakeGPIO:
     LOW = 0
     HIGH = 1
+
+
+class FakeEmitter:
+    def __init__(self):
+        self.duty = 50.0
+        self.events = []
+
+    def set_duty(self, duty):
+        self.duty = duty
+        self.events.append(("duty", duty))
+
+    def set_frequency(self, frequency):
+        self.events.append(("on", frequency, self.duty))
+
+    def off(self):
+        self.events.append(("off",))
+
+
+class OperationalHelpersTest(unittest.TestCase):
+    def test_burst_envelope_stops_with_emitter_off(self):
+        emitter = FakeEmitter()
+        envelope = BurstEnvelope(emitter, 50000, 0.001, 0.001)
+        envelope.start()
+        time.sleep(0.005)
+        envelope.stop()
+        self.assertFalse(envelope.is_alive())
+        self.assertEqual(emitter.events[-1], ("off",))
+
+    def test_margin_sweep_uses_lowest_stable_duty_and_restores_requested_duty(self):
+        emitter = FakeEmitter()
+        noise = summarize_samples(FakeGPIO, [0] * 10, 0.001, 0.002)
+        scan = {"freq": 50000, "signal_level": FakeGPIO.HIGH}
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            samples = [1] * 10 if emitter.duty >= 35 else [0] * 10
+            return summarize_samples(GPIO, samples, interval, confirm_time)
+
+        result = run_margin_test(
+            FakeGPIO,
+            17,
+            emitter,
+            scan,
+            noise,
+            0.01,
+            0.001,
+            0,
+            0,
+            25.0,
+            0.002,
+            window_reader=reader,
+        )
+
+        self.assertEqual(result["minimum_stable_duty"], 35.0)
+        self.assertEqual(emitter.duty, 50.0)
+
+    def test_operational_test_detects_break_and_reacquisition(self):
+        emitter = FakeEmitter()
+        windows = iter([
+            summarize_samples(FakeGPIO, [1] * 6 + [0] * 14 + [1] * 6, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 250, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 5 + [1] * 50, 0.001, 0.002),
+        ])
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            return next(windows)
+
+        result = run_operational_test(
+            FakeGPIO,
+            17,
+            emitter,
+            {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+            0.006,
+            0.014,
+            0.026,
+            0.250,
+            0.055,
+            0.001,
+            0.002,
+            0.120,
+            settle=0,
+            window_reader=reader,
+        )
+
+        self.assertTrue(result["break_detected"])
+        self.assertEqual(result["signal_timeout"], 0.06)
+        self.assertEqual(result["break_release_s"], 0.0)
+        self.assertEqual(result["reacquire_s"], 0.005)
 
 
 class CalibrationMetricsTest(unittest.TestCase):

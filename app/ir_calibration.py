@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -233,7 +234,7 @@ def summarize_samples(GPIO, samples, interval, confirm_time=0.002):
     }
 
 
-def read_window(GPIO, sensor_pin, duration, interval):
+def read_window(GPIO, sensor_pin, duration, interval, confirm_time=0.002):
     end = time.perf_counter() + duration
     samples = []
 
@@ -241,7 +242,7 @@ def read_window(GPIO, sensor_pin, duration, interval):
         samples.append(GPIO.input(sensor_pin))
         time.sleep(interval)
 
-    return summarize_samples(GPIO, samples, interval)
+    return summarize_samples(GPIO, samples, interval, confirm_time)
 
 
 class Emitter:
@@ -328,6 +329,10 @@ class Emitter:
         self.pwm.ChangeFrequency(frequency)
         self.pwm.ChangeDutyCycle(self.duty)
 
+    def set_duty(self, duty):
+        self.off()
+        self.duty = max(0.0, min(100.0, float(duty)))
+
     def off(self):
         if self.kernel_pwm is not None:
             self.kernel_pwm.off()
@@ -352,6 +357,50 @@ class Emitter:
             if self.pi is not None:
                 self.pi.stop()
                 self.pi = None
+
+
+class BurstEnvelope:
+    def __init__(self, emitter, frequency, burst_on, burst_off):
+        self.emitter = emitter
+        self.frequency = int(frequency)
+        self.burst_on = max(0.0005, float(burst_on))
+        self.burst_off = max(0.0005, float(burst_off))
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="agility-ir-calibration-burst",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _run(self):
+        try:
+            while not self._stop.is_set():
+                self.emitter.set_frequency(self.frequency)
+                if self._stop.wait(self.burst_on):
+                    break
+                self.emitter.off()
+                if self._stop.wait(self.burst_off):
+                    break
+        finally:
+            self.emitter.off()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, (self.burst_on + self.burst_off) * 4))
+        self.emitter.off()
+        if self.is_alive():
+            raise CalibrationError("thread do envelope de burst nao encerrou")
+
+    def is_alive(self):
+        return bool(self._thread and self._thread.is_alive())
 
 
 def score_frequency(GPIO, baseline, freq, stats):
@@ -444,6 +493,153 @@ def calculate_signal_timeout(burst_on, burst_off, max_signal_gap, max_timeout=0.
         "signal_timeout": timeout,
         "valid": valid,
         "reason": None if valid else "signal_gap_too_large",
+    }
+
+
+def run_margin_test(
+    GPIO,
+    sensor_pin,
+    emitter,
+    scan,
+    noise_stats,
+    duration,
+    interval,
+    settle,
+    recovery,
+    min_delta,
+    confirm_time,
+    window_reader=read_window,
+):
+    requested_duty = float(emitter.duty)
+    results = []
+    frequency = int(scan["freq"])
+
+    try:
+        for duty in margin_duty_values(requested_duty):
+            emitter.off()
+            time.sleep(recovery)
+            emitter.set_duty(duty)
+            emitter.set_frequency(frequency)
+            time.sleep(settle)
+            stats = window_reader(GPIO, sensor_pin, duration, interval, confirm_time)
+            result = evaluate_frequency(
+                GPIO,
+                noise_stats,
+                frequency,
+                stats,
+                min_delta,
+                confirm_time,
+            )
+            result["duty"] = duty
+            result["expected_signal_level"] = int(scan["signal_level"])
+            results.append(result)
+            emitter.off()
+    finally:
+        emitter.set_duty(requested_duty)
+
+    return {
+        "requested_duty": requested_duty,
+        "results": results,
+        "minimum_stable_duty": minimum_stable_duty(results),
+    }
+
+
+def run_operational_test(
+    GPIO,
+    sensor_pin,
+    emitter,
+    scan,
+    burst_on,
+    burst_off,
+    active_duration,
+    break_duration,
+    reacquire_duration,
+    interval,
+    confirm_time,
+    max_signal_timeout,
+    settle=0.05,
+    window_reader=read_window,
+):
+    signal_level = int(scan["signal_level"])
+    break_level = opposite_level(GPIO, signal_level)
+    envelope = BurstEnvelope(emitter, scan["freq"], burst_on, burst_off)
+
+    try:
+        envelope.start()
+        try:
+            time.sleep(settle)
+            active = window_reader(GPIO, sensor_pin, active_duration, interval, confirm_time)
+        finally:
+            envelope.stop()
+
+        active_max_gap = (
+            active["max_low_run_s"]
+            if signal_level == GPIO.HIGH
+            else active["max_high_run_s"]
+        )
+        timeout_result = calculate_signal_timeout(
+            burst_on,
+            burst_off,
+            active_max_gap,
+            max_signal_timeout,
+        )
+
+        broken = window_reader(GPIO, sensor_pin, break_duration, interval, confirm_time)
+        break_run_s = (
+            broken["max_low_run_s"]
+            if break_level == GPIO.LOW
+            else broken["max_high_run_s"]
+        )
+        break_release_s = (
+            broken["first_low_confirmed_at"]
+            if break_level == GPIO.LOW
+            else broken["first_high_confirmed_at"]
+        )
+        break_detected = (
+            timeout_result["valid"]
+            and break_release_s is not None
+            and break_run_s >= timeout_result["signal_timeout"]
+        )
+
+        envelope.start()
+        try:
+            time.sleep(settle)
+            reacquire = window_reader(
+                GPIO,
+                sensor_pin,
+                reacquire_duration,
+                interval,
+                confirm_time,
+            )
+        finally:
+            envelope.stop()
+    finally:
+        envelope.stop()
+
+    reacquire_s = (
+        reacquire["first_high_confirmed_at"]
+        if signal_level == GPIO.HIGH
+        else reacquire["first_low_confirmed_at"]
+    )
+    residual_signal_samples = (
+        broken["high"] if signal_level == GPIO.HIGH else broken["low"]
+    )
+    return {
+        "active": active,
+        "break": broken,
+        "reacquire": reacquire,
+        "signal_level": signal_level,
+        "break_level": break_level,
+        "active_max_gap_s": active_max_gap,
+        "signal_timeout": timeout_result["signal_timeout"],
+        "timeout_valid": timeout_result["valid"],
+        "timeout_reason": timeout_result["reason"],
+        "break_detected": break_detected,
+        "break_release_s": break_release_s,
+        "break_run_s": break_run_s,
+        "residual_signal_samples": residual_signal_samples,
+        "reacquire_s": reacquire_s,
+        "reacquired": reacquire_s is not None,
     }
 
 
