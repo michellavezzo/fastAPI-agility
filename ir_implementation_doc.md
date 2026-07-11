@@ -2,6 +2,10 @@
 
 Data da consolidacao: 2026-07-03.
 
+Atualizacao do fluxo de calibracao: 2026-07-11. O comportamento descrito nesta
+atualizacao foi conferido no codigo e nos testes automatizados; a nova
+calibracao ainda nao foi validada fisicamente na Raspberry Pi.
+
 Este documento resume as decisoes, descobertas e referencias usadas na implementacao da barreira infravermelha do backend do TCC. O objetivo e servir como base para atualizar posteriormente o texto do TCC.
 
 ## Contexto do problema
@@ -241,14 +245,18 @@ Arquivos principais:
   - Usa rajadas em thread dedicada (`agility-ir-burst`).
   - Usa polling logico rapido quando rajadas estao habilitadas.
   - Bloqueia calibracao durante prova `autorizado` ou `rodando`.
-  - Salva e reaplica a ultima calibracao de `ir_calibration.json`.
+  - Salva, aplica e reaplica somente a ultima calibracao valida de `ir_calibration.json`.
+  - Separa no status a tentativa concluida mais recente (`last_attempt`) da
+    ultima calibracao valida (`last_result`).
 - `app/ir_calibration.py`
   - Concentra a logica reutilizavel de calibracao.
-  - Mede baseline com emissor desligado.
-  - Varre frequencias.
+  - Mede primeiro uma sequencia de janelas temporais com o emissor desligado.
+  - Pareia cada janela OFF, por posicao, com a janela da varredura ativa.
   - Desliga o emissor por `1s` entre frequencias.
   - Testa saturacao nas frequencias sensiveis.
-  - Gera recomendacao de frequencia, duty, rajada e niveis logicos.
+  - Submete no maximo cinco finalistas aos testes de margem de duty, rajada
+    operacional e quebra simulada.
+  - Gera recomendacao de frequencia, duty, rajada, timeout e niveis logicos.
 - `rasp_scripts/testar_sensor_ir.py`
   - Passou a usar a mesma logica de `app/ir_calibration.py`.
   - Continua disponivel para teste manual no terminal da Raspberry.
@@ -287,7 +295,10 @@ export AGILITY_IR_CALIBRATION_SAVE=1
 export AGILITY_IR_USE_SAVED_CALIBRATION=1
 ```
 
-Quando ativo, o backend bloqueia o startup ate terminar a calibracao. O resultado e salvo em `ir_calibration.json`.
+Quando ativo, o backend bloqueia o startup ate terminar a tentativa. Somente um
+resultado valido, com `ok=true` e recomendacao, e aplicado e salvo em
+`ir_calibration.json`. Uma tentativa que termina com `ok=false` conserva a
+configuracao em runtime e o ultimo arquivo valido.
 
 ### Via frontend
 
@@ -298,11 +309,105 @@ O backend:
 1. Bloqueia a operacao se a prova estiver `autorizado` ou `rodando`.
 2. Pausa thread de leitura do sensor.
 3. Pausa emissao IR normal.
-4. Executa varredura com recuperacao de `1s` entre frequencias.
-5. Testa saturacao por `1s` nas frequencias sensiveis.
-6. Aplica a recomendacao em runtime.
-7. Salva `ir_calibration.json`.
-8. Reinicia leitura do sensor e emissao por rajadas.
+4. Mantem o emissor completamente desligado durante toda a fase `noise_scan` e
+   le uma janela temporal para cada posicao da lista de candidatas.
+5. Executa `active_scan`, com recuperacao de `1s` e nova leitura para cada
+   frequencia ativa, pareando-a com a janela OFF da mesma posicao.
+6. Rejeita contaminacao OFF confirmada, contraste insuficiente e perda no teste
+   continuo `hold` de `1s`.
+7. Seleciona no maximo cinco finalistas e executa `margin_test` com quatro niveis
+   de duty.
+8. Executa `burst_test` no envelope operacional e calcula o timeout dinamico.
+9. Executa `break_test`, desligando eletricamente o emissor e medindo liberacao,
+   pulsos residuais e reacquisicao.
+10. Em `select`, escolhe somente entre finalistas validos; a preferencia por
+    `50000Hz` e usada depois das metricas operacionais.
+11. Aplica e salva apenas uma recomendacao valida.
+12. Reinicia a leitura do sensor e a emissao normal em um bloco de limpeza,
+    inclusive quando a tentativa falha.
+
+### Janelas OFF, contraste e descartes
+
+A primeira passagem nao e uma varredura fisica de frequencias. Com o LED IR
+desligado nao existe portadora sendo emitida; por isso nao existe "ruido em
+50000Hz" ou em qualquer outra frequencia nessa fase. `candidate_frequency_hz`
+serve apenas para registrar qual candidata ocupa a mesma posicao temporal. A
+comparacao efetiva usa `window_index` e a ordem das listas `noise_scan` e
+`active_scan`.
+
+Depois da leitura ativa identificar qual nivel representa sinal alinhado, a
+janela OFF correspondente e reavaliada nesse mesmo nivel. O candidato e
+rejeitado com `noise_detected_off` se esse nivel apareceu continuamente durante
+pelo menos `2ms`; esse tempo e um piso e nao pode ser reduzido por configuracao.
+Tambem e exigida diferenca minima de `25` pontos percentuais entre a resposta
+ativa e a resposta OFF. Abaixo desse piso, o motivo e
+`insufficient_contrast`. O teste `hold` continua rejeitando perda por supressao
+de portadora continua com `continuous_signal_suppressed`.
+
+### Margem de duty, rajada e timeout
+
+Depois dos descartes e do `hold`, no maximo cinco candidatos chegam aos testes
+operacionais. Para cada finalista, `margin_test` usa `100%`, `70%`, `40%` e
+`20%` do duty solicitado. Com duty solicitado de `50%`, por exemplo, os testes
+sao feitos em `50%`, `35%`, `20%` e `10%`. O menor valor ainda valido e exposto
+como `minimum_stable_duty`. Ele funciona como indicador pratico da margem
+optica/eletrica e como criterio de ordenacao; a recomendacao continua operando
+com o duty originalmente solicitado.
+
+O `burst_test` restaura o duty solicitado e usa os tempos operacionais atuais,
+por padrao `6ms` ligado e `14ms` desligado, durante pelo menos `1s`. Com
+`period = burst_on + burst_off` e `max_gap` igual ao maior intervalo observado
+sem pulso valido, o timeout candidato e:
+
+```text
+max(3 * period, 2 * max_gap + 0.005s)
+```
+
+No envelope padrao, `period=20ms`; com `max_gap=20ms`, o timeout e `60ms`.
+Existe um teto rigido de `120ms`: o valor calculado nao e truncado para caber no
+teto; se ultrapassar `120ms`, o candidato e rejeitado com
+`signal_gap_too_large`.
+
+### Quebra simulada e reacquisicao
+
+Depois de medir a rajada, a calibracao mantem o emissor desligado por `250ms`,
+mede quando a ausencia de sinal permanece pelo timeout calculado e contabiliza
+pulsos residuais. Em seguida, restabelece a rajada e observa por ate `500ms` o
+tempo de reacquisicao. Falha em detectar a quebra simulada ou em readquirir o
+sinal rejeita a candidata com `break_not_detected`.
+
+Esse teste representa uma interrupcao eletrica total do emissor. Ele nao
+reproduz reflexos, luz ambiente nem caminhos opticos que possam contornar um
+objeto. Por isso tanto `diagnostics.physical_break_validated` quanto
+`recommendation.physical_break_validated` permanecem explicitamente `false`.
+
+### Resultado e persistencia
+
+Os campos anteriores (`scan`, `sensitive`, `hold`, `baseline` e
+`recommendation`) continuam disponiveis. O resultado bruto agora tambem inclui:
+
+- `noise_scan`: janelas OFF, indice temporal, candidata correspondente e
+  estatisticas de nivel/transicoes;
+- `rejected`: candidatas descartadas, metricas e codigos em `reasons`;
+- `margin`: quatro testes de duty e `minimum_stable_duty` de cada finalista;
+- `burst`: maior lacuna de sinal e estatisticas no envelope operacional;
+- `break_tests`: liberacao, duracao da quebra, pulsos residuais, reacquisicao e
+  validade do timeout;
+- `diagnostics`: contagens, resultados completos dos finalistas e o aviso de
+  que a quebra fisica continua pendente.
+
+A recomendacao valida acrescenta `minimum_stable_duty`,
+`burst_max_signal_gap`, `break_release_s`, `reacquire_s` e
+`physical_break_validated=false`.
+
+No retorno de `POST /config/ir/calibracao` e em `GET /config/ir/status`,
+`calibration.last_attempt` recebe o resultado da tentativa concluida, inclusive
+quando ela termina com `ok=false`. Durante uma nova execucao esse campo volta a
+`null`; se ocorrer uma excecao antes de existir resultado, o erro aparece em
+`calibration.error`. Somente um resultado valido substitui
+`calibration.last_result`, `saved_calibration` e `ir_calibration.json`.
+Portanto, tentativa invalida ou excecao nao sobrescreve a ultima calibracao
+valida.
 
 ## Interpretacao dos estados
 
@@ -313,6 +418,42 @@ Com `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`:
 
 O backend nao deve tratar cada pulso da rajada como evento de prova. O evento deve ocorrer apenas quando o feixe logico deixa de estar alinhado por tempo suficiente, controlado por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
 
+Em modo rajada, `sensor_estado_sinal` e uma amostra bruta e pode alternar nas
+fatias OFF. Para decidir se a barreira esta livre ou interrompida, observar
+`sensor_estado_feixe` e `sensor_feixe_logico_alinhado`; a contagem acumulada de
+quebras logicas aparece em `sensor_quebras_logicas`.
+
+## Procedimento de validacao fisica pendente
+
+O novo fluxo nao foi validado fisicamente na Raspberry Pi. Depois de instalar o
+codigo no equipamento, executar este procedimento sem substituir nenhuma etapa
+pelo `break_test` automatico:
+
+1. Executar a calibracao sem prova `autorizado` ou `rodando` e confirmar que o
+   resultado ainda informa `physical_break_validated=false`.
+2. Com a emissao normal em rajadas e o caminho livre, consultar repetidamente
+   `GET /hardware/estado` e registrar o valor inicial de
+   `sensor_quebras_logicas`. Confirmar `sensor_estado_feixe=feixe_alinhado` e
+   `sensor_feixe_logico_alinhado=true`.
+3. Colocar uma placa opaca que cubra integralmente o caminho direto entre
+   emissor e receptor e mante-la por `1s`, tempo superior ao teto de timeout de
+   `120ms`.
+4. Enquanto a placa estiver no caminho, confirmar
+   `sensor_estado_feixe=feixe_quebrado`,
+   `sensor_feixe_logico_alinhado=false` e incremento de exatamente uma unidade
+   em `sensor_quebras_logicas`.
+5. Retirar a placa e confirmar a reacquisicao:
+   `sensor_estado_feixe=feixe_alinhado` e
+   `sensor_feixe_logico_alinhado=true`.
+6. Em uma prova controlada, repetir com uma passagem na velocidade real e
+   verificar `sensor_disparos_aceitos` e `sensor_ultimo_aceito` para largada e
+   chegada. Repetir nas distancias e posicoes de refletor previstas para uso.
+
+Um triangulo automotivo de emergencia nao possui caracterizacao IR conhecida
+neste projeto. Sua aparencia ou retroreflexao em luz visivel nao comprova
+opacidade, refletividade nem bloqueio na faixa infravermelha; ele nao deve ser o
+unico objeto usado para validar a passagem.
+
 ## Licoes aprendidas
 
 - Sensor IR sem identificacao precisa ser tratado empiricamente; datasheets indicam principios, mas nao substituem calibracao do hardware real.
@@ -321,8 +462,17 @@ O backend nao deve tratar cada pulso da rajada como evento de prova. O evento de
 - `GPIO18` e adequado para PWM por hardware na Raspberry Pi Zero 2 W.
 - Alimentar o circuito do receptor em `3.3V` reduz risco de dano ao GPIO e simplifica a leitura logica.
 - O teste de frequencias precisa desligar o emissor entre tentativas, pois a condicao anterior do receptor influencia a leitura seguinte.
+- As leituras iniciais com emissor desligado sao janelas temporais pareadas por
+  posicao; nao representam frequencias fisicas.
 - A faixa de `50kHz` a `60kHz` foi a mais promissora no hardware testado.
 - `50000Hz` e o default pratico atual para este conjunto fisico, mas a calibracao pode escolher outro valor se o conjunto responder melhor.
+- O feixe pode permanecer alinhado em frequencias menores e, ainda assim, a
+  passagem ficar mais dificil de detectar. Margem optica/eletrica excessiva e
+  reflexos intensos podem manter sinal recebido mesmo durante uma obstrucao
+  parcial.
+- A selecao apenas por frequencia e insuficiente. O menor duty estavel e usado
+  como indicador pratico de margem, mas nao substitui o teste de passagem real
+  com objeto opaco.
 - O backend precisa expor status de hardware suficiente para diagnostico remoto: frequencia, duty, backend PWM, conexao pigpio, nivel atual, estado do feixe, erros de GPIO e ultima calibracao.
 
 ## Pendencias e proximos testes
@@ -332,8 +482,13 @@ O backend nao deve tratar cada pulso da rajada como evento de prova. O evento de
   - `python3-pigpio` instalado.
   - se o objetivo for PWM por hardware, instalar `pigpiod` por uma fonte compativel com a imagem usada ou trocar para uma imagem que forneca o daemon.
 - Confirmar que `/config/ir/status` mostra `emissor_modo=kernel.sysfs.PWM.burst` quando o overlay estiver ativo; se `pigpiod` existir, `pigpio_conectado=true` tambem pode aparecer no caminho legado.
-- Executar `POST /config/ir/calibracao` com emissor e receptor alinhados.
-- Verificar se `ir_calibration.json` e criado.
+- Executar `POST /config/ir/calibracao` com emissor e receptor alinhados e
+  confirmar que o LED permanece apagado durante toda a fase `noise_scan`.
+- Conferir `noise_scan`, `rejected`, `margin`, `burst`, `break_tests`, o timeout
+  recomendado de no maximo `120ms` e a preservacao do arquivo anterior quando
+  uma tentativa termina com `ok=false`.
+- Executar e registrar o procedimento de validacao fisica acima; somente depois
+  de observar o hardware atualizar este documento com o resultado.
 - Preparar prova, autorizar largada e confirmar que:
   - feixe alinhado permite autorizacao;
   - passagem de objeto inicia a prova;

@@ -163,18 +163,56 @@ export AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY=50000
 export AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE=1.0
 ```
 
-Quando `AGILITY_IR_CALIBRATE_ON_STARTUP=1`, o backend bloqueia o startup até terminar a varredura. O resultado fica salvo em `ir_calibration.json` e também pode ser gerado pela tela `/config` ou pelo endpoint `POST /config/ir/calibracao`.
-Quando várias frequências respondem de forma praticamente igual, a calibração usa `AGILITY_IR_CALIBRATION_PREFERENCE_TOLERANCE` para tratar pequenas diferenças de amostragem como empate e `AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY` como desempate. Isso evita escolher `10000Hz` ou outra frequência apenas por aparecer com poucos décimos percentuais a mais na varredura.
+Quando `AGILITY_IR_CALIBRATE_ON_STARTUP=1`, o backend bloqueia o startup até
+terminar a tentativa. A calibração também pode ser iniciada pela tela `/config`
+ou pelo endpoint `POST /config/ir/calibracao`.
+
+O fluxo mede primeiro todas as janelas temporais `noise_scan`, com o emissor
+continuamente desligado. As janelas não representam frequências OFF: cada uma é
+pareada por posição com a janela posterior de `active_scan` da candidata
+correspondente. Depois de identificar o nível de sinal na leitura ativa, a
+calibração rejeita a candidata quando esse nível já apareceu continuamente por
+pelo menos `2 ms` na janela OFF (`noise_detected_off`) ou quando o contraste
+ativo menos OFF fica abaixo de `25` pontos percentuais
+(`insufficient_contrast`). O piso de `2 ms` e o contraste mínimo não podem ser
+reduzidos por configuração.
+
+Após o teste de portadora contínua, no máximo cinco finalistas seguem para os
+testes operacionais. O teste de margem mede `100%`, `70%`, `40%` e `20%` do duty
+solicitado e registra o menor valor aprovado em `minimum_stable_duty`; esse
+valor é um indicador prático da margem óptica/elétrica, enquanto a recomendação
+continua operando no duty solicitado. Quando várias candidatas ficam próximas,
+`AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY` participa do desempate depois das
+métricas operacionais.
+
+O teste de rajada restaura o duty solicitado e usa o envelope operacional de
+`6 ms` ligado e `14 ms` desligado. Com `period = burst_on + burst_off`, o timeout
+recomendado é `max(3 * period, 2 * max_gap + 5 ms)`, onde `max_gap` é o maior
+intervalo sem pulso válido observado. O teto é `120 ms`; se o cálculo ultrapassa
+esse valor, a candidata é rejeitada com `signal_gap_too_large`, sem truncar o
+timeout para forçar sua aprovação.
+
+Em seguida, o emissor é desligado para testar a liberação e religado em rajadas
+para medir a reaquisição. Essa quebra é uma simulação elétrica, não uma passagem
+física: `diagnostics.physical_break_validated` e
+`recommendation.physical_break_validated` permanecem `false`.
+
+O resultado inclui os campos `noise_scan`, `rejected`, `margin`, `burst`,
+`break_tests` e `diagnostics`. Em `GET /config/ir/status`,
+`calibration.last_attempt` guarda a tentativa concluída mesmo quando `ok=false`;
+somente uma tentativa válida atualiza `calibration.last_result`,
+`saved_calibration`, a configuração em runtime e `ir_calibration.json`. Assim,
+uma tentativa inválida preserva a calibração válida anterior.
 
 O modo padrão `AGILITY_SENSOR_READ_MODE=auto` tenta usar interrupção por borda quando a portadora não está em rajadas. Com `AGILITY_IR_BURST_ENABLED=1`, o backend usa polling lógico rápido para evitar que cada pulso da rajada seja tratado como largada/chegada. O evento de prova é disparado apenas quando o backend deixa de receber pulsos recentes por `AGILITY_SENSOR_SIGNAL_TIMEOUT`.
 
 O circuito com LED indicador costuma ficar aceso sem sinal e apagar quando o receptor detecta IR. Nessa montagem, o GPIO normalmente fica `HIGH` com feixe alinhado e `LOW` com feixe quebrado/sem sinal; por isso `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`. Confirme sempre com o script de teste, porque a ligação elétrica pode inverter esse comportamento.
 
-Como esse tipo de receptor pode ignorar portadora contínua depois de algum tempo, o emissor usa rajadas por padrão com `AGILITY_IR_BURST_ENABLED=1`, `AGILITY_IR_BURST_ON=0.006` e `AGILITY_IR_BURST_OFF=0.014`. O backend considera o feixe alinhado enquanto recebe pulsos recentes; se passar `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12` sem pulsos, considera feixe quebrado.
+Como esse tipo de receptor pode ignorar portadora contínua depois de algum tempo, o emissor usa rajadas por padrão com `AGILITY_IR_BURST_ENABLED=1`, `AGILITY_IR_BURST_ON=0.006` e `AGILITY_IR_BURST_OFF=0.014`. O backend considera o feixe alinhado enquanto recebe pulsos recentes. `AGILITY_SENSOR_SIGNAL_TIMEOUT=0.12` é o default e o teto de segurança; uma calibração válida pode recomendar um valor menor pela fórmula dinâmica descrita acima.
 
 Para evitar duplo disparo quando o cachorro cruza o feixe, o backend ignora novas bordas durante `AGILITY_SENSOR_DEBOUNCE`. O bloqueio por rearme físico fica desligado por padrão com `AGILITY_SENSOR_REQUIRE_REARM=0`, porque alguns receptores IR não voltam para o nível livre de forma estável. Use `AGILITY_SENSOR_REQUIRE_REARM=1` apenas se `GET /hardware/estado` mostrar `sensor_estado_sinal` alternando de forma limpa entre `feixe_alinhado` e `feixe_quebrado`. `AGILITY_SENSOR_TRIGGER_CONFIRM=0.002` confirma que o nível ativo permaneceu estável por 2 ms antes de aceitar a largada/chegada.
 
-Antes de autorizar a largada, o backend exige feixe alinhado com `AGILITY_SENSOR_REQUIRE_READY=1`, assim como o tutorial só inicia o cronômetro quando o feixe está detectado. Para validar o sinal, observe `sensor_nivel_atual`, `sensor_estado_sinal`, `sensor_transicoes` e `sensor_ultima_transicao` em `GET /hardware/estado` com o feixe livre e depois bloqueado.
+Antes de autorizar a largada, o backend exige feixe alinhado com `AGILITY_SENSOR_REQUIRE_READY=1`, assim como o tutorial só inicia o cronômetro quando o feixe está detectado. `sensor_nivel_atual`, `sensor_estado_sinal`, `sensor_transicoes` e `sensor_ultima_transicao` são diagnósticos do sinal bruto; em modo rajada, use `sensor_estado_feixe` e `sensor_feixe_logico_alinhado` como estado lógico da barreira.
 
 Para evitar bloqueio por uma queda curta do receptor, a autorização não usa apenas a última leitura instantânea. Ela amostra o GPIO por `AGILITY_SENSOR_READY_CONFIRM=0.05` e aceita a largada quando pelo menos `AGILITY_SENSOR_READY_MIN_RATIO=0.2` das leituras indicam feixe alinhado. O valor é menor porque, em modo rajada, o nível alterna entre sinal e intervalo. O resultado da última amostragem aparece em `sensor_ultima_amostra_pronto`.
 
@@ -184,6 +222,33 @@ Para sensor desconhecido, pare o backend e rode:
 python rasp_scripts/testar_sensor_ir.py --pwm-backend kernel_pwm
 ```
 
-O script mede o GPIO com o emissor desligado, varre frequências de 10 kHz a 60 kHz, deixa o emissor desligado por 1 segundo entre emissões e, nas frequências sensíveis, mantém a portadora contínua por 1 segundo para estimar se/quando o sensor satura. Ao final ele imprime os `export AGILITY_*` recomendados para o backend. Use esses valores depois de reiniciar o serviço.
+O script executa o mesmo fluxo do backend, incluindo janelas OFF pareadas,
+rejeições por ruído/contraste, margem de duty, rajada operacional e quebra
+elétrica simulada. Ao final, imprime os `export AGILITY_*` recomendados. Use
+esses valores depois de reiniciar o serviço, mas não trate o teste automático
+como validação física.
+
+Validação física pendente na Raspberry:
+
+1. Com o caminho livre, consulte `GET /hardware/estado`, confirme
+   `sensor_estado_feixe=feixe_alinhado` e
+   `sensor_feixe_logico_alinhado=true`, e registre o valor de
+   `sensor_quebras_logicas`.
+2. Cubra integralmente o caminho entre emissor e receptor com um objeto opaco e
+   mantenha-o por pelo menos `1 s`, acima do teto de timeout de `120 ms`.
+3. Confirme `sensor_estado_feixe=feixe_quebrado`,
+   `sensor_feixe_logico_alinhado=false` e o incremento de exatamente uma unidade
+   em `sensor_quebras_logicas`.
+4. Retire o objeto e confirme a reaquisição com
+   `sensor_estado_feixe=feixe_alinhado` e
+   `sensor_feixe_logico_alinhado=true`; depois repita com uma passagem na
+   velocidade e nas distâncias reais da prova.
+
+Frequências menores podem manter o feixe alinhado e, ainda assim, tornar a
+passagem mais difícil de detectar quando a margem óptica ou os reflexos são
+altos demais. Frequência isolada não basta para selecionar a configuração;
+`minimum_stable_duty` é um indicador prático da margem, mas não substitui a
+validação física. Um triângulo automotivo de emergência não tem caracterização
+IR conhecida neste projeto e não deve ser o único objeto de teste.
 
 Nunca conecte 5V direto no GPIO17 ou no GPIO18. Se o receptor estiver alimentado em 5V como no diagrama do TCC, confirme com multímetro/osciloscópio que o OUT recebido pelo GPIO17 não passa de 3.3V; se passar, use divisor resistivo, level shifter ou saída open-collector com pull-up em 3.3V.
