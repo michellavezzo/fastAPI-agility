@@ -890,7 +890,7 @@ class CalibrationPipelineTest(unittest.TestCase):
 
         self.assertEqual(selected["scan"]["freq"], 50000)
 
-    def test_candidate_ranking_keeps_material_operational_contrast_advantage(self):
+    def test_candidate_ranking_keeps_contrast_diagnostic_after_acceptance(self):
         candidates = [
             self.candidate_result(
                 50000,
@@ -911,7 +911,7 @@ class CalibrationPipelineTest(unittest.TestCase):
             preferred_frequency=50000,
         )
 
-        self.assertEqual(selected["scan"]["freq"], 48000)
+        self.assertEqual(selected["scan"]["freq"], 50000)
 
     def test_shortlist_uses_frequency_preference_within_equivalent_tolerance_buckets(self):
         candidates = [

@@ -363,6 +363,9 @@ backend. Com duty solicitado de `50%`, por exemplo, os testes sao feitos em
 optica/eletrica, mas nao e maximizado automaticamente: valor muito baixo pode
 indicar reserva excessiva e reflexos capazes de contornar parcialmente o
 objeto. A recomendacao continua operando com o duty originalmente solicitado.
+Depois de superar o piso de `25` pontos percentuais, o contraste bruto tambem
+permanece diagnostico, pois inclui a largura do pulso produzido pelo receptor e
+nao mede sozinho a capacidade de detectar uma passagem.
 
 O `burst_test` restaura o duty solicitado e usa os tempos operacionais atuais,
 por padrao `6ms` ligado e `14ms` desligado, durante pelo menos `1s`. Com

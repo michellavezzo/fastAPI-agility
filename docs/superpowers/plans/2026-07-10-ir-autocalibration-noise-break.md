@@ -39,10 +39,10 @@ The implementation was corrected after this evidence:
   candidate;
 - shortlist ranking uses burst-scan contrast and signal percentage, not
   continuous-hold survival;
-- final selection treats timing differences within `0.005` seconds and burst
-  contrast differences within `5` percentage points as equivalent, then uses
-  the physically preferred frequency; `minimum_stable_duty` is diagnostic and
-  no longer automatically rewards excess optical margin;
+- final selection treats timing differences within `0.005` seconds as
+  equivalent, then uses the physically preferred frequency; active contrast
+  and `minimum_stable_duty` remain diagnostics after their acceptance floors
+  and no longer automatically reward longer pulses or excess optical margin;
 - saved recommendations without a positive timeout at or below `0.120` seconds
   are ignored at startup.
 

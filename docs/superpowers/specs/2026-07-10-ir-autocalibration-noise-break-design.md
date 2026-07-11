@@ -163,12 +163,13 @@ A ordenacao deve usar, nesta ordem:
 2. teste de quebra aprovado;
 3. menor intervalo maximo entre pulsos em rajadas;
 4. menor tempo de liberacao e reacquisicao;
-5. maior contraste ativo versus OFF;
-6. proximidade da frequencia preferida quando essas metricas forem equivalentes.
+5. proximidade da frequencia preferida quando essas metricas forem equivalentes.
 
-Tempos dentro de `5ms` e contrastes dentro de `5` pontos percentuais sao
-tratados como equivalentes na selecao final para nao transformar jitter de
-polling e fase da rajada em vantagem falsa. `minimum_stable_duty` permanece
+Tempos dentro de `5ms` sao tratados como equivalentes na selecao final para nao
+transformar jitter de polling em vantagem falsa. Depois que uma candidata
+supera o piso de contraste, seu percentual bruto permanece diagnostico: ele
+tambem reflete a largura do pulso demodulado e nao deve ser interpretado como
+qualidade automaticamente maior. `minimum_stable_duty` tambem permanece
 diagnostico: valor menor representa maior reserva optica, mas reserva excessiva
 pode facilitar caminhos refletidos ao redor do objeto e nao deve ser premiada
 automaticamente sem um teste fisico.
