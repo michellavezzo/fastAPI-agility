@@ -483,7 +483,9 @@ unico objeto usado para validar a passagem.
   - se o objetivo for PWM por hardware, instalar `pigpiod` por uma fonte compativel com a imagem usada ou trocar para uma imagem que forneca o daemon.
 - Confirmar que `/config/ir/status` mostra `emissor_modo=kernel.sysfs.PWM.burst` quando o overlay estiver ativo; se `pigpiod` existir, `pigpio_conectado=true` tambem pode aparecer no caminho legado.
 - Executar `POST /config/ir/calibracao` com emissor e receptor alinhados e
-  confirmar que o LED permanece apagado durante toda a fase `noise_scan`.
+  confirmar que o emissor IR permanece sem portadora durante toda a fase
+  `noise_scan` (pela camera, se necessario). Nao usar o LED indicador bruto do
+  receptor para essa verificacao.
 - Conferir `noise_scan`, `rejected`, `margin`, `burst`, `break_tests`, o timeout
   recomendado de no maximo `120ms` e a preservacao do arquivo anterior quando
   uma tentativa termina com `ok=false`.
