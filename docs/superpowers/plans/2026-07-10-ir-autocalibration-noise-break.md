@@ -405,6 +405,8 @@ git commit -m "feat: measure IR margin and simulated break"
 
 **Interfaces:**
 - Consumes: Tasks 1 and 2 helpers.
+- Produces: `choose_operational_candidate(candidates, preferred_frequency=None) -> dict | None`
+- Produces: `calibration_result_is_valid(result) -> bool`
 - Produces: additive result keys `noise_scan`, `rejected`, `margin`, `burst`, `break_tests`, and `diagnostics`.
 - Produces: recommendation fields `minimum_stable_duty`, `burst_max_signal_gap`, `break_release_s`, `reacquire_s`, and `physical_break_validated`.
 - Produces: calibration state field `last_attempt` while retaining `last_result` as the last valid result.
@@ -463,17 +465,36 @@ max_signal_timeout=0.12,
 
 The flow must emit progress phases `noise_scan`, `active_scan`, `hold`, `margin_test`, `burst_test`, `break_test`, and `select`. Build the noise windows first with the emitter continuously OFF, run active windows second, classify candidates, reject saturated holds, test only the top five finalists, and produce all additive result arrays.
 
+Use these exact data relationships:
+
+- `noise_scan` entries are `{window_index, candidate_frequency_hz, stats}` and are paired with active scans by list position.
+- Early rejected scans retain their diagnostics and use public reason codes `noise_detected_off` and `insufficient_contrast`.
+- A saturated hold appends `continuous_signal_suppressed` and cannot become a finalist.
+- Select up to five finalists by hold stability, contrast, and signal percentage; use distance from the preferred frequency only to resolve otherwise equivalent shortlist candidates.
+- Each finalist record is `{scan, hold, margin, burst, break_test, signal_timeout, valid, reasons}`.
+- `margin` is a list of `{freq, requested_duty, minimum_stable_duty, results}`.
+- `burst` is a list of `{freq, max_signal_gap, stats}`.
+- `break_tests` is a list containing frequency, break detection, release, residual samples, reacquisition, timeout, and timeout validity.
+- Finalists with no stable margin use `insufficient_contrast`; invalid timeout uses `signal_gap_too_large`; failed simulated break uses `break_not_detected`.
+
+`choose_operational_candidate()` must filter invalid candidates and order valid candidates by lower `minimum_stable_duty`, lower burst max gap, lower break release, lower reacquisition time, higher scan contrast, then proximity to the preferred frequency. Missing timing values sort after real values.
+
+The recommendation must use the configured burst values and selected timeout, preserve all existing fields, and add `minimum_stable_duty`, `burst_max_signal_gap`, `break_release_s`, `reacquire_s`, and `physical_break_validated=False`.
+
+Add one pipeline-level test with a fake emitter and deterministic readers/runners. It must prove all OFF windows are read before any active carrier event, only clean finalists reach margin/operational tests, all additive result keys exist, and a no-candidate result has `ok=False` without a recommendation.
+
 Keep `baseline` as the selected candidate's OFF stats, or the first OFF stats when no candidate is selected. Keep the existing `scan`, `sensitive`, `hold`, and `recommendation` keys.
 
 - [ ] **Step 4: Preserve the last valid calibration in `Chronometer`**
 
 ```python
 def _mark_calibration_finished(self, result=None, error=None):
-    # Always place the latest result in calibration.last_attempt.
-    # Update last_result and _calibration_last_result only when the result has a recommendation.
+    valid = calibration_result_is_valid(result)
+    # Always place a returned result in calibration.last_attempt.
+    # Update last_result and _calibration_last_result only when valid is true.
 ```
 
-Pass the current runtime burst settings to `run_ir_calibration()`. Apply and save only when `calibration_result_is_valid(result)` is true. A failed attempt must return HTTP 200 diagnostics without mutating runtime or the saved file.
+Initialize `last_attempt` to `None`, clear it when a new calibration starts, and expose it in the calibration status. Pass the current runtime burst settings to `run_ir_calibration()`. Apply and save only when `calibration_result_is_valid(result)` is true. A failed attempt must return HTTP 200 diagnostics without mutating runtime, `last_result`, `_calibration_last_result`, or the saved file.
 
 - [ ] **Step 5: Extend CLI arguments and terminal output**
 
