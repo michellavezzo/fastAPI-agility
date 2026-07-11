@@ -110,3 +110,6 @@ rasp_scripts/llog.txt
 .mypy_cache/
 
 .idea/*
+
+# Local agent execution ledger
+.superpowers/
