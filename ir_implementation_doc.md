@@ -360,8 +360,9 @@ operacionais. Para cada finalista, `margin_test` usa `100%`, `70%`, `40%` e
 backend. Com duty solicitado de `50%`, por exemplo, os testes sao feitos em
 `50%`, `35%`, `20%` e `10%`. O menor valor ainda valido e exposto como
 `minimum_stable_duty`. Ele funciona como indicador pratico da margem
-optica/eletrica e como criterio de ordenacao; a recomendacao continua operando
-com o duty originalmente solicitado.
+optica/eletrica, mas nao e maximizado automaticamente: valor muito baixo pode
+indicar reserva excessiva e reflexos capazes de contornar parcialmente o
+objeto. A recomendacao continua operando com o duty originalmente solicitado.
 
 O `burst_test` restaura o duty solicitado e usa os tempos operacionais atuais,
 por padrao `6ms` ligado e `14ms` desligado, durante pelo menos `1s`. Com

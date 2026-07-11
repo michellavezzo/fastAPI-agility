@@ -781,15 +781,22 @@ class CalibrationMetricsTest(unittest.TestCase):
 
 class CalibrationPipelineTest(unittest.TestCase):
     @staticmethod
-    def candidate_result(freq, minimum_stable_duty):
+    def candidate_result(
+        freq,
+        minimum_stable_duty,
+        max_signal_gap=0.020,
+        break_release_s=0.0,
+        reacquire_s=0.005,
+        delta=100.0,
+    ):
         return {
-            "scan": {"freq": freq, "delta": 100.0, "signal_pct": 100.0},
+            "scan": {"freq": freq, "delta": delta, "signal_pct": 100.0},
             "margin": {"minimum_stable_duty": minimum_stable_duty},
-            "burst": {"max_signal_gap": 0.020},
+            "burst": {"max_signal_gap": max_signal_gap},
             "break_test": {
                 "break_detected": True,
-                "break_release_s": 0.0,
-                "reacquire_s": 0.005,
+                "break_release_s": break_release_s,
+                "reacquire_s": reacquire_s,
             },
             "signal_timeout": 0.060,
             "valid": True,
@@ -817,10 +824,86 @@ class CalibrationPipelineTest(unittest.TestCase):
             ),
         )
 
-    def test_candidate_ranking_prefers_lower_stable_duty_before_frequency_preference(self):
+    def test_candidate_ranking_keeps_margin_diagnostic_when_operation_is_equivalent(self):
         candidates = [
-            self.candidate_result(50000, minimum_stable_duty=35.0),
-            self.candidate_result(48000, minimum_stable_duty=20.0),
+            self.candidate_result(50000, minimum_stable_duty=50.0),
+            self.candidate_result(44000, minimum_stable_duty=20.0),
+        ]
+
+        selected = calibration.choose_operational_candidate(
+            candidates,
+            preferred_frequency=50000,
+        )
+
+        self.assertEqual(selected["scan"]["freq"], 50000)
+
+    def test_candidate_ranking_prefers_clearly_smaller_signal_gap(self):
+        candidates = [
+            self.candidate_result(
+                50000,
+                minimum_stable_duty=50.0,
+                max_signal_gap=0.020,
+            ),
+            self.candidate_result(
+                48000,
+                minimum_stable_duty=35.0,
+                max_signal_gap=0.008,
+            ),
+        ]
+
+        selected = calibration.choose_operational_candidate(
+            candidates,
+            preferred_frequency=50000,
+        )
+
+        self.assertEqual(selected["scan"]["freq"], 48000)
+
+    def test_candidate_ranking_treats_one_millisecond_jitter_as_equivalent(self):
+        candidates = [
+            self.candidate_result(
+                48000,
+                minimum_stable_duty=35.0,
+                max_signal_gap=0.015,
+                reacquire_s=0.001,
+                delta=30.696,
+            ),
+            self.candidate_result(
+                44000,
+                minimum_stable_duty=20.0,
+                max_signal_gap=0.015,
+                reacquire_s=0.001,
+                delta=28.931,
+            ),
+            self.candidate_result(
+                50000,
+                minimum_stable_duty=50.0,
+                max_signal_gap=0.015,
+                reacquire_s=0.002,
+                delta=29.206,
+            ),
+        ]
+
+        selected = calibration.choose_operational_candidate(
+            candidates,
+            preferred_frequency=50000,
+        )
+
+        self.assertEqual(selected["scan"]["freq"], 50000)
+
+    def test_candidate_ranking_keeps_material_operational_contrast_advantage(self):
+        candidates = [
+            self.candidate_result(
+                50000,
+                minimum_stable_duty=50.0,
+                max_signal_gap=0.015,
+                delta=29.0,
+            ),
+            self.candidate_result(
+                48000,
+                minimum_stable_duty=35.0,
+                max_signal_gap=0.015,
+                delta=40.0,
+            ),
         ]
 
         selected = calibration.choose_operational_candidate(

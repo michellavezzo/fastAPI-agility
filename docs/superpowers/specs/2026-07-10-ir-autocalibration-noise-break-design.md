@@ -161,12 +161,17 @@ A ordenacao deve usar, nesta ordem:
 
 1. ausencia de ruido confirmado;
 2. teste de quebra aprovado;
-3. menor `minimum_stable_duty`;
-4. menor intervalo maximo entre pulsos em rajadas;
-5. menor tempo de liberacao;
-6. menor tempo de reacquisicao;
-7. maior contraste ativo versus OFF;
-8. proximidade da frequencia preferida, somente como desempate final.
+3. menor intervalo maximo entre pulsos em rajadas;
+4. menor tempo de liberacao e reacquisicao;
+5. maior contraste ativo versus OFF;
+6. proximidade da frequencia preferida quando essas metricas forem equivalentes.
+
+Tempos dentro de `5ms` e contrastes dentro de `5` pontos percentuais sao
+tratados como equivalentes na selecao final para nao transformar jitter de
+polling e fase da rajada em vantagem falsa. `minimum_stable_duty` permanece
+diagnostico: valor menor representa maior reserva optica, mas reserva excessiva
+pode facilitar caminhos refletidos ao redor do objeto e nao deve ser premiada
+automaticamente sem um teste fisico.
 
 A preferencia atual por 50 kHz deixa de mascarar diferencas mensuraveis, mas
 continua produzindo resultado deterministico quando os candidatos forem

@@ -918,12 +918,23 @@ def _ascending_metric(value):
     return (0, float(value))
 
 
-def choose_operational_candidate(candidates, preferred_frequency=None):
+def _ascending_metric_bucket(value, tolerance):
+    if value is None:
+        return (1, math.inf)
+    effective_tolerance = max(float(tolerance), 0.000001)
+    return (0, round(float(value) / effective_tolerance))
+
+
+def choose_operational_candidate(
+    candidates,
+    preferred_frequency=None,
+    timing_tolerance=0.005,
+    contrast_tolerance=5.0,
+):
     valid_candidates = [candidate for candidate in candidates if candidate.get("valid", True)]
 
     def rank(candidate):
         scan = candidate.get("scan") or {}
-        margin = candidate.get("margin") or {}
         burst = candidate.get("burst") or {}
         break_test = candidate.get("break_test") or {}
         preferred_distance = (
@@ -932,12 +943,15 @@ def choose_operational_candidate(candidates, preferred_frequency=None):
             else 0
         )
         return (
-            _ascending_metric(margin.get("minimum_stable_duty")),
+            _ascending_metric_bucket(burst.get("max_signal_gap"), timing_tolerance),
+            _ascending_metric_bucket(break_test.get("break_release_s"), timing_tolerance),
+            _ascending_metric_bucket(break_test.get("reacquire_s"), timing_tolerance),
+            -preference_bucket(scan.get("delta", -math.inf), contrast_tolerance),
+            preferred_distance,
             _ascending_metric(burst.get("max_signal_gap")),
             _ascending_metric(break_test.get("break_release_s")),
             _ascending_metric(break_test.get("reacquire_s")),
             -float(scan.get("delta", -math.inf)),
-            preferred_distance,
         )
 
     return min(valid_candidates, key=rank, default=None)

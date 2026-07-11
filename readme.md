@@ -120,7 +120,9 @@ receptor suprime o sinal; essa supressão não elimina uma candidata. No máximo
 cinco finalistas passam pelo teste de margem, também em rajadas, a `100%`,
 `70%`, `40%` e `20%` do duty solicitado. O menor duty aprovado aparece como
 `minimum_stable_duty`, um indicador prático da margem óptica/elétrica; a
-recomendação continua usando o duty solicitado. O timeout é calculado como
+recomendação continua usando o duty solicitado. Duty mínimo mais baixo não é
+automaticamente melhor, pois margem excessiva pode manter reflexos durante uma
+passagem. O timeout é calculado como
 `max(3 * period, 2 * max_gap + 5 ms)`. O limite é `120 ms`; candidatas que
 exigirem timeout maior são rejeitadas.
 

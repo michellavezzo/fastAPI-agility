@@ -184,7 +184,9 @@ finalistas seguem para os testes operacionais. O teste de margem também usa
 rajadas e mede `100%`, `70%`, `40%` e `20%` do duty solicitado, registrando o
 menor valor aprovado em `minimum_stable_duty`; esse valor é um indicador
 prático da margem óptica/elétrica, enquanto a recomendação continua operando no
-duty solicitado. Quando várias candidatas ficam próximas,
+duty solicitado. Valor mínimo mais baixo não é automaticamente melhor, porque
+margem excessiva pode preservar caminhos refletidos durante uma passagem.
+Quando várias candidatas ficam próximas,
 `AGILITY_IR_CALIBRATION_PREFERRED_FREQUENCY` participa do desempate depois das
 métricas operacionais.
 
