@@ -402,6 +402,7 @@ git commit -m "feat: measure IR margin and simulated break"
 - Modify: `app/chrono.py:145-169,1191-1319`
 - Modify: `rasp_scripts/testar_sensor_ir.py:22-168`
 - Modify: `tests/test_ir_calibration.py`
+- Create: `tests/test_chrono_calibration.py`
 
 **Interfaces:**
 - Consumes: Tasks 1 and 2 helpers.
@@ -441,6 +442,8 @@ Add tests around pure selection and persistence decisions:
         self.assertFalse(calibration_result_is_valid({"ok": False, "recommendation": None}))
         self.assertTrue(calibration_result_is_valid({"ok": True, "recommendation": {"frequency_hz": 50000}}))
 ```
+
+Add an actual `Chronometer._mark_calibration_finished()` regression in `tests/test_chrono_calibration.py` using an object created with `object.__new__(Chronometer)`, an `RLock`, and a no-op `_mark_state_changed_locked`. Start with an existing valid `last_result`, finish an invalid attempt, and assert `last_attempt` changes while both `last_result` and `_calibration_last_result` retain the existing valid object.
 
 - [ ] **Step 2: Run tests and verify RED**
 
