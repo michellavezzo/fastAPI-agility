@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import sys
 import time
 from datetime import datetime
@@ -193,42 +194,54 @@ def frequency_list(start, stop, step, freqs=None):
     return list(range(int(start), int(stop) + 1, int(step)))
 
 
-def read_window(GPIO, sensor_pin, duration, interval):
-    end = time.perf_counter() + duration
-    samples = 0
-    high = 0
-    low = 0
-    transitions = 0
-    first = None
-    last = None
+def summarize_samples(GPIO, samples, interval, confirm_time=0.002):
+    samples = list(samples)
+    high = sum(level == GPIO.HIGH for level in samples)
+    low = len(samples) - high
+    transitions = sum(left != right for left, right in zip(samples, samples[1:]))
 
-    while time.perf_counter() < end:
-        level = GPIO.input(sensor_pin)
-        if first is None:
-            first = level
-        if last is not None and level != last:
-            transitions += 1
-        last = level
+    def run_metrics(level):
+        longest = 0
+        current = 0
+        first_confirmed_at = None
+        required = max(1, math.ceil(confirm_time / interval))
+        for index, sample in enumerate(samples):
+            current = current + 1 if sample == level else 0
+            longest = max(longest, current)
+            if current >= required and first_confirmed_at is None:
+                first_confirmed_at = (index - current + 1) * interval
+        return round(longest * interval, 6), (
+            round(first_confirmed_at, 6) if first_confirmed_at is not None else None
+        )
 
-        if level == GPIO.HIGH:
-            high += 1
-        else:
-            low += 1
-        samples += 1
-        time.sleep(interval)
-
-    high_pct = (high / samples * 100) if samples else 0
-    low_pct = (low / samples * 100) if samples else 0
+    max_high, first_high = run_metrics(GPIO.HIGH)
+    max_low, first_low = run_metrics(GPIO.LOW)
+    count = len(samples)
     return {
-        "samples": samples,
+        "samples": count,
         "high": high,
         "low": low,
-        "high_pct": round(high_pct, 3),
-        "low_pct": round(low_pct, 3),
+        "high_pct": round(high / count * 100, 3) if count else 0,
+        "low_pct": round(low / count * 100, 3) if count else 0,
         "transitions": transitions,
-        "first": first,
-        "last": last,
+        "first": samples[0] if samples else None,
+        "last": samples[-1] if samples else None,
+        "max_high_run_s": max_high,
+        "max_low_run_s": max_low,
+        "first_high_confirmed_at": first_high,
+        "first_low_confirmed_at": first_low,
     }
+
+
+def read_window(GPIO, sensor_pin, duration, interval):
+    end = time.perf_counter() + duration
+    samples = []
+
+    while time.perf_counter() < end:
+        samples.append(GPIO.input(sensor_pin))
+        time.sleep(interval)
+
+    return summarize_samples(GPIO, samples, interval)
 
 
 class Emitter:
@@ -358,6 +371,83 @@ def score_frequency(GPIO, baseline, freq, stats):
         "signal_level_name": level_name(GPIO, signal_level),
         "signal_pct": round(level_pct(GPIO, stats, signal_level), 3),
         "delta": round(delta, 3),
+    }
+
+
+def evaluate_frequency(GPIO, noise_stats, freq, active_stats, min_delta, noise_confirm_time):
+    scored = score_frequency(GPIO, noise_stats, freq, active_stats)
+    signal_level = scored["signal_level"]
+    noise_signal_pct = level_pct(GPIO, noise_stats, signal_level)
+    noise_longest_run_s = (
+        noise_stats["max_high_run_s"]
+        if signal_level == GPIO.HIGH
+        else noise_stats["max_low_run_s"]
+    )
+    reasons = []
+    if scored["delta"] < float(min_delta):
+        reasons.append("insufficient_delta")
+    if noise_longest_run_s >= float(noise_confirm_time):
+        reasons.append("noise_detected_off")
+
+    return {
+        **scored,
+        "valid": not reasons,
+        "noise_stats": noise_stats,
+        "noise_signal_pct": noise_signal_pct,
+        "noise_longest_run_s": noise_longest_run_s,
+        "reasons": reasons,
+    }
+
+
+def classify_frequency_results(GPIO, noise_results, active_results, min_delta, noise_confirm_time):
+    noise_by_freq = {int(freq): stats for freq, stats in noise_results}
+    sensitive = []
+    rejected = []
+    for freq, active_stats in active_results:
+        freq = int(freq)
+        noise_stats = noise_by_freq.get(freq)
+        if noise_stats is None:
+            rejected.append({
+                "freq": freq,
+                "stats": active_stats,
+                "reasons": ["missing_noise_stats"],
+                "valid": False,
+            })
+            continue
+
+        result = evaluate_frequency(
+            GPIO,
+            noise_stats,
+            freq,
+            active_stats,
+            min_delta,
+            noise_confirm_time,
+        )
+        if result["valid"]:
+            sensitive.append(result)
+        else:
+            rejected.append(result)
+    return sensitive, rejected
+
+
+def margin_duty_values(duty):
+    values = [round(max(0.0, min(100.0, float(duty) * ratio)), 3) for ratio in (1.0, 0.7, 0.4, 0.2)]
+    return list(dict.fromkeys(values))
+
+
+def minimum_stable_duty(results):
+    stable = [float(item["duty"]) for item in results if item.get("valid")]
+    return min(stable, default=None)
+
+
+def calculate_signal_timeout(burst_on, burst_off, max_signal_gap, max_timeout=0.12):
+    period = float(burst_on) + float(burst_off)
+    timeout = round(max(period * 3, float(max_signal_gap) * 2 + 0.005), 6)
+    valid = timeout <= float(max_timeout)
+    return {
+        "signal_timeout": timeout,
+        "valid": valid,
+        "reason": None if valid else "signal_gap_too_large",
     }
 
 
