@@ -367,10 +367,12 @@ class BurstEnvelope:
         self.burst_off = max(0.0005, float(burst_off))
         self._stop = threading.Event()
         self._thread = None
+        self._error = None
 
     def start(self):
         if self.is_alive():
             return
+        self._error = None
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._run,
@@ -380,6 +382,7 @@ class BurstEnvelope:
         self._thread.start()
 
     def _run(self):
+        error = None
         try:
             while not self._stop.is_set():
                 self.emitter.set_frequency(self.frequency)
@@ -388,16 +391,32 @@ class BurstEnvelope:
                 self.emitter.off()
                 if self._stop.wait(self.burst_off):
                     break
+        except Exception as exc:
+            error = exc
         finally:
-            self.emitter.off()
+            try:
+                self.emitter.off()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+            self._error = error
 
     def stop(self):
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, (self.burst_on + self.burst_off) * 4))
-        self.emitter.off()
+        stop_error = None
+        try:
+            self.emitter.off()
+        except Exception as exc:
+            stop_error = exc
         if self.is_alive():
             raise CalibrationError("thread do envelope de burst nao encerrou")
+        error, self._error = self._error, None
+        if error is not None:
+            raise CalibrationError(f"falha na thread do envelope IR: {error}") from error
+        if stop_error is not None:
+            raise CalibrationError(f"falha ao desligar envelope IR: {stop_error}") from stop_error
 
     def is_alive(self):
         return bool(self._thread and self._thread.is_alive())
@@ -513,6 +532,7 @@ def run_margin_test(
     requested_duty = float(emitter.duty)
     results = []
     frequency = int(scan["freq"])
+    expected_signal_level = int(scan["signal_level"])
 
     try:
         for duty in margin_duty_values(requested_duty):
@@ -531,11 +551,17 @@ def run_margin_test(
                 confirm_time,
             )
             result["duty"] = duty
-            result["expected_signal_level"] = int(scan["signal_level"])
+            result["expected_signal_level"] = expected_signal_level
+            if result["signal_level"] != expected_signal_level:
+                result["valid"] = False
+                result["reasons"].append("signal_level_changed")
             results.append(result)
             emitter.off()
     finally:
-        emitter.set_duty(requested_duty)
+        try:
+            emitter.set_duty(requested_duty)
+        finally:
+            emitter.off()
 
     return {
         "requested_duty": requested_duty,
@@ -584,7 +610,13 @@ def run_operational_test(
             max_signal_timeout,
         )
 
-        broken = window_reader(GPIO, sensor_pin, break_duration, interval, confirm_time)
+        broken = window_reader(
+            GPIO,
+            sensor_pin,
+            break_duration,
+            interval,
+            timeout_result["signal_timeout"],
+        )
         break_run_s = (
             broken["max_low_run_s"]
             if break_level == GPIO.LOW
@@ -603,7 +635,6 @@ def run_operational_test(
 
         envelope.start()
         try:
-            time.sleep(settle)
             reacquire = window_reader(
                 GPIO,
                 sensor_pin,

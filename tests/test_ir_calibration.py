@@ -1,9 +1,12 @@
+import threading
 import time
 import unittest
+from unittest.mock import call, patch
 
 from app.ir_calibration import (
     BurstEnvelope,
     CalibrationError,
+    Emitter,
     calculate_signal_timeout,
     classify_frequency_results,
     margin_duty_values,
@@ -33,6 +36,37 @@ class FakeEmitter:
 
     def off(self):
         self.events.append(("off",))
+
+
+class FaultyEmitter(FakeEmitter):
+    def __init__(self):
+        super().__init__()
+        self.frequency_attempted = threading.Event()
+        self.failure = RuntimeError("carrier start failed")
+
+    def set_frequency(self, frequency):
+        self.events.append(("on_failed", frequency, self.duty))
+        self.frequency_attempted.set()
+        raise self.failure
+
+
+class FakePWM:
+    def __init__(self, duty_reader):
+        self.duty_reader = duty_reader
+        self.events = []
+
+    def ChangeDutyCycle(self, duty):
+        self.events.append(("duty", duty, self.duty_reader()))
+
+
+class FakeEmitterGPIO:
+    LOW = 0
+
+    def __init__(self):
+        self.outputs = []
+
+    def output(self, pin, level):
+        self.outputs.append((pin, level))
 
 
 class OperationalHelpersTest(unittest.TestCase):
@@ -70,7 +104,84 @@ class OperationalHelpersTest(unittest.TestCase):
         )
 
         self.assertEqual(result["minimum_stable_duty"], 35.0)
+        self.assertEqual(
+            [item["duty"] for item in result["results"]],
+            [50.0, 35.0, 20.0, 10.0],
+        )
         self.assertEqual(emitter.duty, 50.0)
+
+    def test_real_emitter_set_duty_turns_carrier_off_before_clamping(self):
+        GPIO = FakeEmitterGPIO()
+        emitter = Emitter(GPIO, 18, 50.0, pwm_backend="rpi_gpio")
+        pwm = FakePWM(lambda: emitter.duty)
+        emitter.pwm = pwm
+
+        emitter.set_duty(125.0)
+        emitter.set_duty(-5.0)
+
+        self.assertEqual(
+            pwm.events,
+            [
+                ("duty", 0, 50.0),
+                ("duty", 0, 100.0),
+            ],
+        )
+        self.assertEqual(GPIO.outputs, [(18, 0), (18, 0)])
+        self.assertEqual(emitter.duty, 0.0)
+
+    def test_margin_reader_failure_restores_requested_duty_and_turns_emitter_off(self):
+        emitter = FakeEmitter()
+        noise = summarize_samples(FakeGPIO, [0] * 10, 0.001, 0.002)
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            raise RuntimeError("reader failed")
+
+        with self.assertRaisesRegex(RuntimeError, "reader failed"):
+            run_margin_test(
+                FakeGPIO,
+                17,
+                emitter,
+                {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+                noise,
+                0.01,
+                0.001,
+                0,
+                0,
+                25.0,
+                0.002,
+                window_reader=reader,
+            )
+
+        self.assertEqual(emitter.duty, 50.0)
+        self.assertEqual(emitter.events[-1], ("off",))
+
+    def test_margin_rejects_changed_signal_level(self):
+        emitter = FakeEmitter()
+        noise = summarize_samples(FakeGPIO, [1] * 10, 0.001, 0.002)
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            return summarize_samples(GPIO, [0] * 10, interval, confirm_time)
+
+        result = run_margin_test(
+            FakeGPIO,
+            17,
+            emitter,
+            {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+            noise,
+            0.01,
+            0.001,
+            0,
+            0,
+            25.0,
+            0.002,
+            window_reader=reader,
+        )
+
+        self.assertIsNone(result["minimum_stable_duty"])
+        self.assertEqual(
+            [item["reasons"] for item in result["results"]],
+            [["signal_level_changed"]] * 4,
+        )
 
     def test_operational_test_detects_break_and_reacquisition(self):
         emitter = FakeEmitter()
@@ -104,6 +215,136 @@ class OperationalHelpersTest(unittest.TestCase):
         self.assertEqual(result["signal_timeout"], 0.06)
         self.assertEqual(result["break_release_s"], 0.0)
         self.assertEqual(result["reacquire_s"], 0.005)
+
+    def test_operational_test_propagates_worker_failure_after_emitter_off(self):
+        emitter = FaultyEmitter()
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            self.assertTrue(emitter.frequency_attempted.wait(0.5))
+            return summarize_samples(GPIO, [1] * 100, interval, confirm_time)
+
+        with self.assertRaises(CalibrationError) as captured:
+            run_operational_test(
+                FakeGPIO,
+                17,
+                emitter,
+                {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+                0.006,
+                0.014,
+                0.1,
+                0.1,
+                0.1,
+                0.001,
+                0.002,
+                0.120,
+                settle=0,
+                window_reader=reader,
+            )
+
+        self.assertIs(captured.exception.__cause__, emitter.failure)
+        self.assertEqual(emitter.events[-1], ("off",))
+
+    def test_break_release_ignores_short_pulse_before_qualifying_run(self):
+        emitter = FakeEmitter()
+        windows = iter([
+            [1] * 6 + [0] * 14 + [1] * 6,
+            [0] * 10 + [1] * 10 + [0] * 70,
+            [0] * 5 + [1] * 50,
+        ])
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            return summarize_samples(GPIO, next(windows), interval, confirm_time)
+
+        result = run_operational_test(
+            FakeGPIO,
+            17,
+            emitter,
+            {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+            0.006,
+            0.014,
+            0.026,
+            0.090,
+            0.055,
+            0.001,
+            0.002,
+            0.120,
+            settle=0,
+            window_reader=reader,
+        )
+
+        self.assertTrue(result["break_detected"])
+        self.assertEqual(result["signal_timeout"], 0.06)
+        self.assertEqual(result["break_release_s"], 0.02)
+
+    def test_operational_reader_uses_requested_durations_and_break_timeout(self):
+        emitter = FakeEmitter()
+        calls = []
+        windows = iter([
+            [1] * 6 + [0] * 14 + [1] * 6,
+            [0] * 250,
+            [0] * 5 + [1] * 50,
+        ])
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            calls.append((duration, confirm_time))
+            return summarize_samples(GPIO, next(windows), interval, confirm_time)
+
+        run_operational_test(
+            FakeGPIO,
+            17,
+            emitter,
+            {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+            0.006,
+            0.014,
+            0.026,
+            0.250,
+            0.055,
+            0.001,
+            0.002,
+            0.120,
+            settle=0,
+            window_reader=reader,
+        )
+
+        self.assertEqual(
+            calls,
+            [
+                (0.026, 0.002),
+                (0.250, 0.06),
+                (0.055, 0.002),
+            ],
+        )
+
+    def test_reacquisition_sampling_does_not_wait_for_settle(self):
+        emitter = FakeEmitter()
+        windows = iter([
+            summarize_samples(FakeGPIO, [1] * 6 + [0] * 14 + [1] * 6, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 250, 0.001, 0.06),
+            summarize_samples(FakeGPIO, [0] * 5 + [1] * 50, 0.001, 0.002),
+        ])
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            return next(windows)
+
+        with patch("app.ir_calibration.time.sleep") as sleep:
+            run_operational_test(
+                FakeGPIO,
+                17,
+                emitter,
+                {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+                0.006,
+                0.014,
+                0.026,
+                0.250,
+                0.055,
+                0.001,
+                0.002,
+                0.120,
+                settle=0.05,
+                window_reader=reader,
+            )
+
+        self.assertEqual(sleep.call_args_list, [call(0.05)])
 
 
 class CalibrationMetricsTest(unittest.TestCase):
