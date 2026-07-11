@@ -366,6 +366,7 @@ class BurstEnvelope:
         self.burst_on = max(0.0005, float(burst_on))
         self.burst_off = max(0.0005, float(burst_off))
         self._stop = threading.Event()
+        self._carrier_lock = threading.Lock()
         self._thread = None
         self._error = None
 
@@ -385,17 +386,22 @@ class BurstEnvelope:
         error = None
         try:
             while not self._stop.is_set():
-                self.emitter.set_frequency(self.frequency)
+                with self._carrier_lock:
+                    if self._stop.is_set():
+                        break
+                    self.emitter.set_frequency(self.frequency)
                 if self._stop.wait(self.burst_on):
                     break
-                self.emitter.off()
+                with self._carrier_lock:
+                    self.emitter.off()
                 if self._stop.wait(self.burst_off):
                     break
         except Exception as exc:
             error = exc
         finally:
             try:
-                self.emitter.off()
+                with self._carrier_lock:
+                    self.emitter.off()
             except Exception as exc:
                 if error is None:
                     error = exc
@@ -403,13 +409,15 @@ class BurstEnvelope:
 
     def stop(self):
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=max(1.0, (self.burst_on + self.burst_off) * 4))
         stop_error = None
         try:
-            self.emitter.off()
+            with self._carrier_lock:
+                self.emitter.off()
         except Exception as exc:
             stop_error = exc
+        # OFF under the lock plus the worker's locked event check forbids any later ON.
+        if self._thread is not None:
+            self._thread.join(timeout=max(1.0, (self.burst_on + self.burst_off) * 4))
         if self.is_alive():
             raise CalibrationError("thread do envelope de burst nao encerrou")
         error, self._error = self._error, None

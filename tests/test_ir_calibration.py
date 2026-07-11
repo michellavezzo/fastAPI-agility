@@ -50,6 +50,19 @@ class FaultyEmitter(FakeEmitter):
         raise self.failure
 
 
+class DelayedEmitter(FakeEmitter):
+    def __init__(self):
+        super().__init__()
+        self.activation_entered = threading.Event()
+        self.release_activation = threading.Event()
+
+    def set_frequency(self, frequency):
+        self.activation_entered.set()
+        if not self.release_activation.wait(1.0):
+            raise RuntimeError("carrier activation was not released")
+        self.events.append(("on", frequency, self.duty))
+
+
 class FakePWM:
     def __init__(self, duty_reader):
         self.duty_reader = duty_reader
@@ -77,6 +90,62 @@ class OperationalHelpersTest(unittest.TestCase):
         time.sleep(0.005)
         envelope.stop()
         self.assertFalse(envelope.is_alive())
+        self.assertEqual(emitter.events[-1], ("off",))
+
+    def test_burst_stop_serializes_off_after_delayed_carrier_activation(self):
+        emitter = DelayedEmitter()
+        envelope = BurstEnvelope(emitter, 50000, 0.001, 0.001)
+        envelope.start()
+        self.assertTrue(emitter.activation_entered.wait(0.5))
+
+        join_called = threading.Event()
+        original_join = envelope._thread.join
+
+        def recording_join(timeout=None):
+            join_called.set()
+            return original_join(timeout)
+
+        envelope._thread.join = recording_join
+        stop_returned = threading.Event()
+        stop_errors = []
+
+        def stop_envelope():
+            try:
+                envelope.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+            finally:
+                stop_returned.set()
+
+        stop_thread = threading.Thread(target=stop_envelope)
+        stop_thread.start()
+        self.assertTrue(envelope._stop.wait(0.5))
+
+        stop_returned_while_blocked = stop_returned.is_set()
+        join_called_while_blocked = join_called.wait(0.1)
+        emitter.release_activation.set()
+
+        self.assertTrue(stop_returned.wait(0.5))
+        stop_thread.join(timeout=0.5)
+        self.assertFalse(stop_thread.is_alive())
+        self.assertFalse(stop_returned_while_blocked)
+        self.assertFalse(join_called_while_blocked)
+        self.assertEqual(stop_errors, [])
+        self.assertFalse(envelope.is_alive())
+        self.assertEqual(emitter.events[-1], ("off",))
+        self.assertNotIn(("on", 50000, 50.0), emitter.events[-1:])
+
+    def test_burst_stop_consumes_worker_error_after_first_raise(self):
+        emitter = FaultyEmitter()
+        envelope = BurstEnvelope(emitter, 50000, 0.001, 0.001)
+        envelope.start()
+        self.assertTrue(emitter.frequency_attempted.wait(0.5))
+
+        with self.assertRaises(CalibrationError) as captured:
+            envelope.stop()
+
+        self.assertIs(captured.exception.__cause__, emitter.failure)
+        envelope.stop()
         self.assertEqual(emitter.events[-1], ("off",))
 
     def test_margin_sweep_uses_lowest_stable_duty_and_restores_requested_duty(self):
@@ -345,6 +414,62 @@ class OperationalHelpersTest(unittest.TestCase):
             )
 
         self.assertEqual(sleep.call_args_list, [call(0.05)])
+
+    def test_operational_test_orders_active_break_and_reacquisition_phases(self):
+        events = []
+
+        class RecordingEnvelope:
+            def start(self):
+                events.append("start")
+
+            def stop(self):
+                events.append("stop")
+
+        windows = iter([
+            summarize_samples(FakeGPIO, [1] * 6 + [0] * 14 + [1] * 6, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 250, 0.001, 0.06),
+            summarize_samples(FakeGPIO, [0] * 5 + [1] * 50, 0.001, 0.002),
+        ])
+        read_phases = iter(["read_active", "read_break", "read_reacquire"])
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            events.append(next(read_phases))
+            return next(windows)
+
+        with patch(
+            "app.ir_calibration.BurstEnvelope",
+            return_value=RecordingEnvelope(),
+        ):
+            run_operational_test(
+                FakeGPIO,
+                17,
+                FakeEmitter(),
+                {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+                0.006,
+                0.014,
+                0.026,
+                0.250,
+                0.055,
+                0.001,
+                0.002,
+                0.120,
+                settle=0,
+                window_reader=reader,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                "start",
+                "read_active",
+                "stop",
+                "read_break",
+                "start",
+                "read_reacquire",
+                "stop",
+                "stop",
+            ],
+        )
 
 
 class CalibrationMetricsTest(unittest.TestCase):
