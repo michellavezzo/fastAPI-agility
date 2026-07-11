@@ -443,6 +443,32 @@ entao corrigida para usar rajadas em `active_scan` e `margin_test`, deixando o
 `360ms`, tambem passou a ser ignorado no startup por exceder o teto atual de
 `120ms`.
 
+### Resultado final da calibracao em rajadas - 2026-07-11
+
+A execucao final, ja com todos os criterios corrigidos, produziu:
+
+- `51` janelas OFF e `51` varreduras ativas em rajadas;
+- nenhum descarte por ruido com o emissor desligado;
+- `27` frequencias sensiveis e `5` finalistas operacionalmente validos;
+- frequencia recomendada e salva: `50000Hz`;
+- duty solicitado: `50%`; menor duty estavel medido: `35%`;
+- envelope: `6ms` ligado / `14ms` desligado;
+- maior lacuna de sinal: `15ms`;
+- quebra eletrica simulada detectada e reacquisicao em aproximadamente `1ms`;
+- timeout dinamico recomendado e salvo: `60ms`;
+- backend PWM: `kernel.sysfs.PWM`.
+
+O `hold` continuo em `50000Hz` perdeu o nivel esperado apos cerca de `81ms`,
+sem invalidar o candidato. Isso confirma que a supressao da portadora continua
+e compativel com operacao estavel em rajadas.
+
+Apos a solicitacao de um bloqueio fisico, o backend observou um grupo de quebras
+logicas entre `01:17:32.123` e `01:17:32.658`, seguido de reacquisicao e mais de
+um minuto sem novas quebras espontaneas. O grupo durou aproximadamente `0.54s`,
+abaixo do debounce de prova de `1s`; a confirmacao de que esse grupo corresponde
+ao bloqueio intencional do usuario ainda estava pendente no momento deste
+registro.
+
 ## Interpretacao dos estados
 
 Com `AGILITY_SENSOR_ACTIVE_LEVEL=LOW`:
