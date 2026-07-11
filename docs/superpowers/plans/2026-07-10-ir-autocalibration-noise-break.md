@@ -319,9 +319,11 @@ class BurstEnvelope:
         self.burst_off = max(0.0005, float(burst_off))
         self._stop = threading.Event()
         self._thread = None
+        self._error = None
 
     def start(self):
         self._stop.clear()
+        self._error = None
         self._thread = threading.Thread(target=self._run, name="agility-ir-calibration-burst", daemon=True)
         self._thread.start()
 
@@ -334,6 +336,8 @@ class BurstEnvelope:
                 self.emitter.off()
                 if self._stop.wait(self.burst_off):
                     break
+        except Exception as exc:
+            self._error = exc
         finally:
             self.emitter.off()
 
@@ -342,12 +346,17 @@ class BurstEnvelope:
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, (self.burst_on + self.burst_off) * 4))
         self.emitter.off()
+        if self.is_alive():
+            raise CalibrationError("thread do envelope de burst nao encerrou")
+        error, self._error = self._error, None
+        if error is not None:
+            raise CalibrationError(f"falha na thread do envelope IR: {error}") from error
 
     def is_alive(self):
         return bool(self._thread and self._thread.is_alive())
 ```
 
-`Emitter.set_duty()` must clamp to 0..100 and update the stored duty without leaving the carrier active. `run_margin_test()` must restore the requested duty in `finally`.
+`Emitter.set_duty()` must clamp to 0..100 and update the stored duty without leaving the carrier active. `run_margin_test()` must restore the requested duty in `finally`, reject a response whose detected signal level differs from the original scan level, and preserve the stable rejection reason `signal_level_changed`. Fault-injection tests must cover the real `Emitter.set_duty()`, reader failure, duty restoration, and exact duty order.
 
 - [ ] **Step 4: Implement operational sampling and simulated break**
 
@@ -364,7 +373,7 @@ reacquired = window_reader(GPIO, sensor_pin, reacquire_duration, interval, confi
 envelope.stop()
 ```
 
-It must derive the max signal gap from the longest run at the opposite level, require a confirmed break-level run at least as long as the candidate timeout, count residual signal samples, and always stop the envelope in `finally`.
+It must derive the max signal gap from the longest run at the opposite level. The break window must use the calculated candidate timeout as its confirmation duration so `break_release_s` identifies the first break-level run long enough to trigger the logical break, rather than a short flicker. Reacquisition sampling must start immediately after restarting the envelope, without a settle delay that would hide latency. It must count residual signal samples and always stop the envelope in `finally`. Tests must prove worker exceptions propagate after PWM shutdown and must record the caller-supplied window durations and break confirmation timeout.
 
 - [ ] **Step 5: Verify GREEN and commit Task 2**
 
