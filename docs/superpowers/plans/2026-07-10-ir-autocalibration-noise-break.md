@@ -210,8 +210,8 @@ git commit -m "test: define IR calibration signal metrics"
 - Consumes: Task 1 metric helpers.
 - Produces: `Emitter.set_duty(duty) -> None`
 - Produces: `BurstEnvelope(emitter, frequency, burst_on, burst_off)` with `start()` and `stop()`.
-- Produces: `run_margin_test(...) -> dict`
-- Produces: `run_operational_test(...) -> dict`
+- Produces: `run_margin_test(GPIO, sensor_pin, emitter, scan, noise_stats, duration, interval, settle, recovery, min_delta, confirm_time, window_reader=read_window) -> dict`
+- Produces: `run_operational_test(GPIO, sensor_pin, emitter, scan, burst_on, burst_off, active_duration, break_duration, reacquire_duration, interval, confirm_time, max_signal_timeout, settle=0.05, window_reader=read_window) -> dict`
 
 - [ ] **Step 1: Write failing tests for margin sweep ranking and burst cleanup**
 
@@ -241,9 +241,57 @@ class OperationalHelpersTest(unittest.TestCase):
         envelope.stop()
         self.assertFalse(envelope.is_alive())
         self.assertEqual(emitter.events[-1], ("off",))
-```
 
-Add a deterministic `run_operational_test()` test by injecting a `window_reader` callable that returns complete real result dictionaries for active, break, and reacquisition windows. Assert `break_detected`, `break_release_s`, `reacquire_s`, `burst_max_signal_gap`, and the calculated `signal_timeout`.
+    def test_margin_sweep_uses_lowest_stable_duty_and_restores_requested_duty(self):
+        emitter = FakeEmitter()
+        noise = summarize_samples(FakeGPIO, [0] * 10, 0.001, 0.002)
+        scan = {"freq": 50000, "signal_level": FakeGPIO.HIGH}
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            samples = [1] * 10 if emitter.duty >= 35 else [0] * 10
+            return summarize_samples(GPIO, samples, interval, confirm_time)
+
+        result = run_margin_test(
+            FakeGPIO, 17, emitter, scan, noise, 0.01, 0.001,
+            0, 0, 25.0, 0.002, window_reader=reader,
+        )
+
+        self.assertEqual(result["minimum_stable_duty"], 35.0)
+        self.assertEqual(emitter.duty, 50.0)
+
+    def test_operational_test_detects_break_and_reacquisition(self):
+        emitter = FakeEmitter()
+        windows = iter([
+            summarize_samples(FakeGPIO, [1] * 6 + [0] * 14 + [1] * 6, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 250, 0.001, 0.002),
+            summarize_samples(FakeGPIO, [0] * 5 + [1] * 50, 0.001, 0.002),
+        ])
+
+        def reader(GPIO, sensor_pin, duration, interval, confirm_time):
+            return next(windows)
+
+        result = run_operational_test(
+            FakeGPIO,
+            17,
+            emitter,
+            {"freq": 50000, "signal_level": FakeGPIO.HIGH},
+            0.006,
+            0.014,
+            0.026,
+            0.250,
+            0.055,
+            0.001,
+            0.002,
+            0.120,
+            settle=0,
+            window_reader=reader,
+        )
+
+        self.assertTrue(result["break_detected"])
+        self.assertEqual(result["signal_timeout"], 0.06)
+        self.assertEqual(result["break_release_s"], 0.0)
+        self.assertEqual(result["reacquire_s"], 0.005)
+```
 
 - [ ] **Step 2: Run the tests and verify RED**
 
@@ -339,10 +387,23 @@ git commit -m "feat: measure IR margin and simulated break"
 Add tests around pure selection and persistence decisions:
 
 ```python
+    def candidate_result(self, freq, minimum_stable_duty):
+        return {
+            "scan": {"freq": freq, "delta": 100.0, "signal_pct": 100.0},
+            "margin": {"minimum_stable_duty": minimum_stable_duty},
+            "burst": {"max_signal_gap": 0.020},
+            "break_test": {
+                "break_detected": True,
+                "break_release_s": 0.0,
+                "reacquire_s": 0.005,
+            },
+            "signal_timeout": 0.060,
+        }
+
     def test_candidate_ranking_prefers_lower_stable_duty_before_frequency_preference(self):
         candidates = [
-            candidate_result(50000, minimum_stable_duty=35.0),
-            candidate_result(48000, minimum_stable_duty=20.0),
+            self.candidate_result(50000, minimum_stable_duty=35.0),
+            self.candidate_result(48000, minimum_stable_duty=20.0),
         ]
         selected = choose_operational_candidate(candidates, preferred_frequency=50000)
         self.assertEqual(selected["scan"]["freq"], 48000)
@@ -536,4 +597,3 @@ Stop the backend process using the listener PID for port 8000, restart it with t
 - [ ] **Step 6: Coordinate the physical passage test**
 
 Ask the user to block the real optical path with an opaque object while monitoring `sensor_estado_feixe`, `sensor_quebras_logicas`, and accepted events. Record the physical result in `ir_implementation_doc.md` only after it is observed.
-
