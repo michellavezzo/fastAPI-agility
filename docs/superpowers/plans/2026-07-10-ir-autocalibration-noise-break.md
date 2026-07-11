@@ -320,6 +320,7 @@ class BurstEnvelope:
         self._stop = threading.Event()
         self._thread = None
         self._error = None
+        self._carrier_lock = threading.Lock()
 
     def start(self):
         self._stop.clear()
@@ -330,22 +331,30 @@ class BurstEnvelope:
     def _run(self):
         try:
             while not self._stop.is_set():
-                self.emitter.set_frequency(self.frequency)
+                with self._carrier_lock:
+                    if self._stop.is_set():
+                        break
+                    self.emitter.set_frequency(self.frequency)
                 if self._stop.wait(self.burst_on):
                     break
-                self.emitter.off()
+                with self._carrier_lock:
+                    self.emitter.off()
                 if self._stop.wait(self.burst_off):
                     break
         except Exception as exc:
             self._error = exc
         finally:
-            self.emitter.off()
+            with self._carrier_lock:
+                self.emitter.off()
 
     def stop(self):
         self._stop.set()
+        with self._carrier_lock:
+            self.emitter.off()
         if self._thread is not None:
             self._thread.join(timeout=max(1.0, (self.burst_on + self.burst_off) * 4))
-        self.emitter.off()
+        with self._carrier_lock:
+            self.emitter.off()
         if self.is_alive():
             raise CalibrationError("thread do envelope de burst nao encerrou")
         error, self._error = self._error, None
@@ -373,7 +382,7 @@ reacquired = window_reader(GPIO, sensor_pin, reacquire_duration, interval, confi
 envelope.stop()
 ```
 
-It must derive the max signal gap from the longest run at the opposite level. The break window must use the calculated candidate timeout as its confirmation duration so `break_release_s` identifies the first break-level run long enough to trigger the logical break, rather than a short flicker. Reacquisition sampling must start immediately after restarting the envelope, without a settle delay that would hide latency. It must count residual signal samples and always stop the envelope in `finally`. Tests must prove worker exceptions propagate after PWM shutdown and must record the caller-supplied window durations and break confirmation timeout.
+It must derive the max signal gap from the longest run at the opposite level. The break window must use the calculated candidate timeout as its confirmation duration so `break_release_s` identifies the first break-level run long enough to trigger the logical break, rather than a short flicker. Reacquisition sampling must start immediately after restarting the envelope, without a settle delay that would hide latency. It must count residual signal samples and always stop the envelope in `finally`. Tests must prove worker exceptions propagate after PWM shutdown, that a second `stop()` does not re-raise a consumed worker error, that a delayed carrier activation cannot complete after `stop()` returns, that reacquisition starts before its reader, and that caller-supplied window durations and break confirmation timeout are preserved.
 
 - [ ] **Step 5: Verify GREEN and commit Task 2**
 
