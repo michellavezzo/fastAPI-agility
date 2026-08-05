@@ -84,6 +84,20 @@ def get_prova(db: Session, prova_id: int):
 def get_provas(db: Session):
     return db.query(Prova).all()
 
+
+def has_completed_official_run(db: Session, prova_id: int) -> bool:
+    return (
+        db.query(Cronometragem.id_cronometro)
+        .join(Inscricao, Cronometragem.id_inscricao == Inscricao.id_inscricao)
+        .filter(
+            Inscricao.id_prova == prova_id,
+            Cronometragem.tipo == "prova",
+            Cronometragem.status == "finalizado",
+        )
+        .first()
+        is not None
+    )
+
 def update_prova(db: Session, prova_id: int, prova_update: ProvaUpdate):
     db_prova = get_prova(db, prova_id)
     for key, value in prova_update.model_dump(exclude_unset=True).items():

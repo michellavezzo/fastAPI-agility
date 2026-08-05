@@ -74,6 +74,8 @@ _course_recognition_listener_timer = None
 _course_recognition_task = None
 _course_recognition_last_persisted_version = None
 _course_recognition_start_lock = threading.RLock()
+COURSE_RECOGNITION_TICK_INTERVAL_SECONDS = 0.25
+COURSE_RECOGNITION_MAX_RETRY_SECONDS = 2.0
 STATIC_DIR = FilePath(__file__).resolve().parent.parent / "static"
 
 
@@ -250,13 +252,29 @@ def restore_course_recognition():
 
 async def course_recognition_tick_loop():
     global _course_recognition_last_persisted_version
+    retry_delay = COURSE_RECOGNITION_TICK_INTERVAL_SECONDS
     while True:
-        state = get_course_recognition().tick()
-        if state["versao"] != _course_recognition_last_persisted_version:
-            with SessionLocal() as db:
-                crud.update_course_recognition_state(db, state)
-            _course_recognition_last_persisted_version = state["versao"]
-        await asyncio.sleep(0.25)
+        try:
+            state = get_course_recognition().tick()
+            if state["versao"] != _course_recognition_last_persisted_version:
+                with SessionLocal() as db:
+                    crud.update_course_recognition_state(db, state)
+                _course_recognition_last_persisted_version = state["versao"]
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception(
+                "Falha no ciclo de reconhecimento de pista; uma nova tentativa será feita."
+            )
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(
+                retry_delay * 2,
+                COURSE_RECOGNITION_MAX_RETRY_SECONDS,
+            )
+            continue
+
+        retry_delay = COURSE_RECOGNITION_TICK_INTERVAL_SECONDS
+        await asyncio.sleep(COURSE_RECOGNITION_TICK_INTERVAL_SECONDS)
 
 
 @app.on_event("startup")
@@ -595,6 +613,20 @@ def iniciar_reconhecimento_pista(
         prova = crud.get_prova(db, body.id_prova)
         if prova is None:
             raise HTTPException(status_code=404, detail="Prova não encontrada")
+        chrono_state = get_chrono().get_estado_completo()
+        official_run_in_memory = chrono_state["estado"] in (
+            "autorizado",
+            "rodando",
+            "finalizado",
+        )
+        if official_run_in_memory or crud.has_completed_official_run(db, body.id_prova):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "O reconhecimento de pista é uma etapa pré-prova e não pode ser iniciado "
+                    "após o início da corrida oficial desta prova."
+                ),
+            )
         timer = get_course_recognition()
         if timer.get_state()["estado"] != "aguardando":
             raise HTTPException(

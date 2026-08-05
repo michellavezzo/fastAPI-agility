@@ -202,3 +202,76 @@ console.log(JSON.stringify({{
         "active": {"recognitionEmphasized": True, "proofTimersDemoted": True},
         "waiting": {"recognitionEmphasized": False, "proofTimersDemoted": False},
     }
+
+
+def test_official_run_states_disable_recognition_start_without_inferring_history():
+    waiting_state = json.dumps(
+        {
+            **_recognition_state(1, "aguardando"),
+            "id_prova": None,
+            "id_reconhecimento": None,
+        }
+    )
+    result = _run_operator_script(
+        f"""
+const proofState = (estado, versao) => ({{
+  estado,
+  versao,
+  id_prova: 1,
+  faltas: 0,
+  recusas: 0,
+  tia_decorrido: 0,
+  top_decorrido: 0,
+}});
+setRecognitionSnapshot({waiting_state});
+setSnapshot(proofState('idle', 1));
+const idle = elements.get('btnStartRecognition').disabled;
+const active = {{}};
+for (const [index, estado] of ['autorizado', 'rodando', 'finalizado'].entries()) {{
+  setSnapshot(proofState(estado, index + 2));
+  active[estado] = elements.get('btnStartRecognition').disabled;
+}}
+setSnapshot(proofState('idle', 5));
+console.log(JSON.stringify({{
+  idle,
+  active,
+  idleAfterCurrentRun: elements.get('btnStartRecognition').disabled,
+}}));
+"""
+    )
+
+    assert result == {
+        "idle": False,
+        "active": {"autorizado": True, "rodando": True, "finalizado": True},
+        "idleAfterCurrentRun": False,
+    }
+
+
+def test_recognition_action_displays_backend_conflict_detail():
+    result = _run_operator_script(
+        """
+(async () => {
+  const alerts = [];
+  globalThis.alert = message => alerts.push(message);
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 409,
+    async json() {
+      return {detail: 'Reconhecimento indisponível após a corrida oficial.'};
+    },
+  });
+  const succeeded = await recognitionAction(
+    '/reconhecimento-pista/iniciar',
+    {id_prova: 1, duracao_segundos: 420},
+  );
+  console.log(JSON.stringify({succeeded, alerts}));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+    )
+
+    assert result == {
+        "succeeded": False,
+        "alerts": [
+            "Erro no reconhecimento: Reconhecimento indisponível após a corrida oficial."
+        ],
+    }

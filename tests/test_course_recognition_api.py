@@ -1,3 +1,4 @@
+import asyncio
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -99,6 +100,119 @@ def test_start_persists_recognition_session_by_prova(client, prova):
         assert row.duracao_segundos == 420
         assert row.intervalo_segundos == 180
         assert row.status == "reconhecimento"
+
+
+@pytest.mark.parametrize("official_state", ["autorizado", "rodando", "finalizado"])
+def test_start_rejects_prova_with_official_run_in_memory(
+    client, prova, inscricao, official_state
+):
+    http, Session, _, _ = client
+    chrono = main.get_chrono()
+    chrono.prepare(
+        inscricao.id_inscricao,
+        {"id_prova": prova.id_prova},
+    )
+    assert chrono.autorizar() is True
+    if official_state in ("rodando", "finalizado"):
+        chrono.simular_acionamento()
+    if official_state == "finalizado":
+        assert chrono.forcar_fim() is True
+    assert chrono.get_estado_completo()["estado"] == official_state
+
+    response = http.post(
+        "/reconhecimento-pista/iniciar",
+        json={"id_prova": prova.id_prova, "duracao_segundos": 420},
+    )
+
+    assert response.status_code == 409
+    assert "corrida oficial" in response.json()["detail"].lower()
+    with Session() as db:
+        assert db.query(models.ReconhecimentoPista).count() == 0
+
+
+def test_active_official_run_blocks_recognition_for_another_prova(client, prova, inscricao):
+    http, Session, _, _ = client
+    chrono = main.get_chrono()
+    chrono.prepare(
+        inscricao.id_inscricao,
+        {"id_prova": prova.id_prova},
+    )
+    assert chrono.autorizar() is True
+    with Session() as db:
+        other_prova = models.Prova(
+            categoria="Jumping",
+            classe="A1",
+            num_obstaculos=12,
+            tsp=50.0,
+            tmp=65.0,
+            vel_media_necessaria=3.0,
+            comprimento_pista=150,
+        )
+        db.add(other_prova)
+        db.commit()
+        other_prova_id = other_prova.id_prova
+
+    response = http.post(
+        "/reconhecimento-pista/iniciar",
+        json={"id_prova": other_prova_id, "duracao_segundos": 420},
+    )
+
+    assert response.status_code == 409
+    assert "corrida oficial" in response.json()["detail"].lower()
+
+
+def test_persisted_official_run_blocks_only_its_prova_after_confirmation(
+    client, prova, inscricao
+):
+    http, Session, _, _ = client
+    chrono = main.get_chrono()
+    chrono.prepare(
+        inscricao.id_inscricao,
+        {"id_prova": prova.id_prova},
+    )
+    assert chrono.autorizar() is True
+    chrono.simular_acionamento()
+    assert chrono.forcar_fim() is True
+    assert http.post("/prova-ativa/confirmar").status_code == 200
+    assert chrono.get_estado_completo()["estado"] == "idle"
+
+    with Session() as db:
+        official_timing = (
+            db.query(models.Cronometragem)
+            .filter(
+                models.Cronometragem.id_inscricao == inscricao.id_inscricao,
+                models.Cronometragem.tipo == "prova",
+                models.Cronometragem.status == "finalizado",
+            )
+            .one()
+        )
+        assert official_timing.tempo_oficial is not None
+        other_prova = models.Prova(
+            categoria="Jumping",
+            classe="A1",
+            num_obstaculos=12,
+            tsp=50.0,
+            tmp=65.0,
+            vel_media_necessaria=3.0,
+            comprimento_pista=150,
+        )
+        db.add(other_prova)
+        db.commit()
+        other_prova_id = other_prova.id_prova
+
+    completed_response = http.post(
+        "/reconhecimento-pista/iniciar",
+        json={"id_prova": prova.id_prova, "duracao_segundos": 420},
+    )
+    new_prova_response = http.post(
+        "/reconhecimento-pista/iniciar",
+        json={"id_prova": other_prova_id, "duracao_segundos": 420},
+    )
+
+    assert completed_response.status_code == 409
+    assert "corrida oficial" in completed_response.json()["detail"].lower()
+    assert new_prova_response.status_code == 200
+    assert new_prova_response.json()["id_prova"] == other_prova_id
 
 
 def test_cancel_is_persisted_and_state_is_waiting(client, prova):
@@ -333,6 +447,48 @@ def test_background_tick_persists_only_the_interval_transition(client, prova):
         row = db.query(models.ReconhecimentoPista).one()
         assert row.status == "intervalo"
         assert row.reconhecimento_finalizado_em is not None
+
+
+def test_tick_loop_retries_transient_persistence_failure_and_propagates_cancellation(
+    monkeypatch,
+):
+    clock = FakeClock()
+    timer = CourseRecognitionTimer(clock=clock)
+    timer.start(id_prova=7, session_id=3, duration_seconds=420)
+    clock.advance(600)
+    attempts = []
+    sleep_delays = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return False
+
+    def persist_once_then_succeed(db, state):
+        attempts.append((state["estado"], state["versao"]))
+        if len(attempts) == 1:
+            raise RuntimeError("database is locked")
+
+    async def controlled_sleep(delay):
+        sleep_delays.append(delay)
+        if len(attempts) >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(main, "get_course_recognition", lambda: timer)
+    monkeypatch.setattr(main, "SessionLocal", FakeSession)
+    monkeypatch.setattr(main.crud, "update_course_recognition_state", persist_once_then_succeed)
+    monkeypatch.setattr(main.asyncio, "sleep", controlled_sleep)
+    monkeypatch.setattr(main, "_course_recognition_last_persisted_version", 1)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(main.course_recognition_tick_loop())
+
+    assert attempts == [("liberado", 3), ("liberado", 3)]
+    assert main._course_recognition_last_persisted_version == 3
+    assert sleep_delays
+    assert all(0 < delay <= 2.0 for delay in sleep_delays)
 
 
 def test_startup_restores_naive_sqlite_timestamp_as_utc(tmp_path, monkeypatch):

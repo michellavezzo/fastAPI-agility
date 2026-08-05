@@ -74,6 +74,28 @@ def test_start_and_transitions_increment_version_and_notify_listener_once():
     assert len(changes) == 2
 
 
+def test_listener_failure_does_not_interrupt_release_or_other_listeners(caplog):
+    clock = FakeClock()
+    timer = CourseRecognitionTimer(clock=clock)
+    timer.start(id_prova=7, session_id=3, duration_seconds=420)
+    delivered = []
+
+    def fail_on_interval(state):
+        if state["estado"] == "intervalo":
+            raise RuntimeError("listener unavailable")
+
+    timer.add_state_change_listener(fail_on_interval)
+    timer.add_state_change_listener(delivered.append)
+    clock.advance(600)
+
+    with caplog.at_level("ERROR"):
+        released = timer.tick()
+
+    assert released["estado"] == "liberado"
+    assert [state["estado"] for state in delivered] == ["intervalo", "liberado"]
+    assert "listener unavailable" in caplog.text
+
+
 def test_cancel_requires_full_restart():
     clock = FakeClock()
     timer = CourseRecognitionTimer(clock=clock)

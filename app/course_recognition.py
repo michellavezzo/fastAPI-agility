@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -228,4 +229,7 @@ class CourseRecognitionTimer:
     @staticmethod
     def _notify_listeners(listeners, state):
         for listener in listeners:
-            listener(dict(state))
+            try:
+                listener(dict(state))
+            except Exception:
+                logging.exception("Falha ao notificar alteração do reconhecimento de pista.")

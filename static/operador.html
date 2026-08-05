@@ -239,6 +239,9 @@ function setRecognitionSnapshot(data, authoritative=false){
 
 function updateButtons(estado){
   $('btnPreparar').disabled = (estado==='rodando'||estado==='autorizado');
+  const officialRunStarted = estado==='autorizado'||estado==='rodando'||estado==='finalizado';
+  const recognitionWaiting = recognitionSnapshot && recognitionSnapshot.estado === 'aguardando';
+  $('btnStartRecognition').disabled = !recognitionWaiting || officialRunStarted;
   const releasedForPreparedProva = recognitionSnapshot && recognitionSnapshot.estado === 'liberado' && recognitionSnapshot.id_prova === (lastSnapshot && lastSnapshot.id_prova);
   $('btnAutorizar').disabled = estado!=='preparado' || !releasedForPreparedProva;
   $('btnSimular').disabled = !(estado==='autorizado'||estado==='rodando');
