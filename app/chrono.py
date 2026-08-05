@@ -1368,12 +1368,20 @@ class Chronometer:
             self._mark_state_changed_locked()
             logging.info(f"Preparado para inscrição #{id_inscricao}")
 
-    def autorizar(self):
+    def autorizar(self, authorization_guard=None):
         with self._lock:
             self._last_authorize_error = None
             if self._estado != "preparado":
                 self._last_authorize_error = "Estado inválido para autorizar"
                 return False
+
+            if authorization_guard is not None:
+                authorization_error = authorization_guard(
+                    self._dados_inscricao.get("id_prova")
+                )
+                if authorization_error:
+                    self._last_authorize_error = authorization_error
+                    return False
 
             if self.sensor_require_ready and not self._sensor_ready_to_start_locked():
                 self._last_authorize_error = (

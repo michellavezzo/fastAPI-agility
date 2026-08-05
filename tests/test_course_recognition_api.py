@@ -180,6 +180,123 @@ def test_authorization_requires_released_recognition_for_prepared_prova(client, 
     assert http.post("/prova-ativa/autorizar").status_code == 200
 
 
+def test_authorization_reports_interval_time_remaining(client, prova, inscricao):
+    http, _, timer, clock = client
+    assert http.post(
+        "/prova-ativa/preparar", json={"id_inscricao": inscricao.id_inscricao}
+    ).status_code == 200
+    timer.start(prova.id_prova, session_id=12, duration_seconds=420)
+    clock.advance(420)
+    assert timer.tick()["estado"] == "intervalo"
+
+    response = http.post("/prova-ativa/autorizar")
+
+    assert response.status_code == 409
+    assert "180s restantes" in response.json()["detail"]
+
+
+def test_authorization_validation_and_transition_are_atomic_against_prepare(
+    client, prova, inscricao, monkeypatch
+):
+    http, Session, timer, clock = client
+    assert http.post(
+        "/prova-ativa/preparar", json={"id_inscricao": inscricao.id_inscricao}
+    ).status_code == 200
+
+    with Session() as db:
+        other_prova = models.Prova(
+            categoria="Jumping",
+            classe="A1",
+            num_obstaculos=12,
+            tsp=50.0,
+            tmp=65.0,
+            vel_media_necessaria=3.0,
+            comprimento_pista=150,
+        )
+        other_competidor = models.Competidor(nome="Bruno", escola="Clube")
+        other_cao = models.Cao(
+            microchip="456",
+            nome="Lua",
+            raca="Shetland Sheepdog",
+            cernelha="35",
+            categoria_salto="Small",
+        )
+        db.add_all([other_prova, other_competidor, other_cao])
+        db.flush()
+        other_inscricao = models.Inscricao(
+            id_prova=other_prova.id_prova,
+            id_competidor=other_competidor.id_competidor,
+            microchip_cao=other_cao.microchip,
+            colete_competidor="8",
+        )
+        db.add(other_inscricao)
+        db.commit()
+        other_prova_id = other_prova.id_prova
+        other_inscricao_id = other_inscricao.id_inscricao
+
+    timer.start(prova.id_prova, session_id=13, duration_seconds=420)
+    clock.advance(600)
+    assert timer.tick()["estado"] == "liberado"
+
+    chrono = main.get_chrono()
+    transitions = []
+    original_mark_state_changed = chrono._mark_state_changed_locked
+
+    def record_state_change():
+        transitions.append((chrono._estado, chrono._dados_inscricao.get("id_prova")))
+        original_mark_state_changed()
+
+    monkeypatch.setattr(chrono, "_mark_state_changed_locked", record_state_change)
+
+    validation_entered = Event()
+    allow_validation_to_finish = Event()
+    original_tick = timer.tick
+
+    def blocked_tick():
+        state = original_tick()
+        validation_entered.set()
+        assert allow_validation_to_finish.wait(timeout=2)
+        return state
+
+    monkeypatch.setattr(timer, "tick", blocked_tick)
+
+    prepare_entered = Event()
+    prepare_completed = Event()
+    original_prepare = chrono.prepare
+
+    def tracked_prepare(id_inscricao, dados):
+        if id_inscricao == other_inscricao_id:
+            prepare_entered.set()
+        result = original_prepare(id_inscricao, dados)
+        if id_inscricao == other_inscricao_id:
+            prepare_completed.set()
+        return result
+
+    monkeypatch.setattr(chrono, "prepare", tracked_prepare)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        authorization = executor.submit(http.post, "/prova-ativa/autorizar")
+        assert validation_entered.wait(timeout=2)
+        preparation = executor.submit(
+            http.post,
+            "/prova-ativa/preparar",
+            json={"id_inscricao": other_inscricao_id},
+        )
+        assert prepare_entered.wait(timeout=2)
+        prepare_finished_during_validation = prepare_completed.wait(timeout=0.2)
+        allow_validation_to_finish.set()
+        authorization_response = authorization.result(timeout=3)
+        preparation_response = preparation.result(timeout=3)
+
+    assert prepare_finished_during_validation is False
+    assert authorization_response.status_code == 200
+    assert preparation_response.status_code == 200
+    assert transitions[:2] == [
+        ("autorizado", prova.id_prova),
+        ("preparado", other_prova_id),
+    ]
+
+
 def test_websocket_sends_authoritative_recognition_snapshot(client):
     http, _, _, _ = client
 

@@ -686,24 +686,30 @@ def preparar_prova(body: schemas.ProvaAtivaPreparar, db: Session = Depends(get_d
 @app.post("/prova-ativa/autorizar", response_model=schemas.ProvaAtivaEstado)
 def autorizar_prova():
     chrono = get_chrono()
-    prepared_state = chrono.get_estado_completo()
-    id_prova = prepared_state.get("id_prova")
-    if prepared_state["estado"] == "preparado":
+
+    def validate_course_recognition(id_prova):
         recognition = get_course_recognition()
         recognition_state = recognition.tick()
-        if not recognition.is_released_for(id_prova):
-            remaining = recognition_state.get("reconhecimento_restante")
-            if remaining is None:
-                remaining = recognition_state.get("intervalo_restante")
+        if not (
+            recognition_state["estado"] == "liberado"
+            and recognition_state["id_prova"] == id_prova
+        ):
+            remaining_field = {
+                "reconhecimento": "reconhecimento_restante",
+                "intervalo": "intervalo_restante",
+            }.get(recognition_state["estado"])
+            if remaining_field is not None:
+                remaining = recognition_state.get(remaining_field)
+            else:
+                remaining = None
             remaining_detail = "sem sessão ativa" if remaining is None else f"{remaining:.0f}s restantes"
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Reconhecimento de pista não liberado para a prova "
-                    f"{id_prova}: estado {recognition_state['estado']} ({remaining_detail})."
-                ),
+            return (
+                "Reconhecimento de pista não liberado para a prova "
+                f"{id_prova}: estado {recognition_state['estado']} ({remaining_detail})."
             )
-    if not chrono.autorizar():
+        return None
+
+    if not chrono.autorizar(validate_course_recognition):
         raise HTTPException(
             status_code=409,
             detail=chrono.get_last_authorize_error() or "Estado inválido para autorizar",
