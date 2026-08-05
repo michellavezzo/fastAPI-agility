@@ -14,23 +14,35 @@ body{background:#111;color:#eee;font-family:'Segoe UI',Arial,sans-serif;overflow
 .estado-rodando{background:#c00;color:#fff;animation:pulse 1s infinite}
 .estado-finalizado{background:#090;color:#fff}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.7}}
-.top-timer{font-size:15vw;font-weight:bold;font-variant-numeric:tabular-nums;letter-spacing:.05em;line-height:1;margin:10px 0}
-.tia-timer{font-size:4vw;color:#aaa;font-variant-numeric:tabular-nums}
-.tia-label,.top-label{font-size:1.8vw;color:#666;text-transform:uppercase;letter-spacing:3px}
-.info-row{display:flex;gap:40px;margin-top:20px;font-size:2.5vw}
+.top-timer{font-size:clamp(3.4rem,15vw,21rem);font-weight:bold;font-variant-numeric:tabular-nums;letter-spacing:.05em;line-height:1;margin:10px 0}
+.tia-timer{font-size:clamp(1.5rem,5vw,7.5rem);color:#ccc;font-variant-numeric:tabular-nums}
+.tia-label,.top-label{font-size:clamp(.9rem,2.2vw,3.2rem);color:#8a8a8a;text-transform:uppercase;letter-spacing:3px}
+.info-row{display:flex;gap:40px;margin-top:20px}
 .info-item{text-align:center}
-.info-item .val{font-size:4vw;font-weight:bold}
-.info-item .lbl{font-size:1.4vw;color:#666;text-transform:uppercase}
+.info-item .val{font-size:clamp(2rem,4.5vw,6.5rem);font-weight:bold}
+.info-item .lbl{font-size:clamp(.85rem,1.7vw,2.4rem);color:#8a8a8a;text-transform:uppercase}
 .faltas .val{color:#f80}
 .recusas .val{color:#e44}
-.competitor-info{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:30px;padding:12px;background:rgba(0,0,0,.7);font-size:1.6vw;color:#aaa}
-.competitor-info span{color:#ddd;font-weight:bold}
+.competitor-info{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;flex-wrap:wrap;gap:8px 44px;padding:16px 24px;background:rgba(0,0,0,.7);font-size:clamp(1.05rem,2.6vw,3.6rem);color:#bbb;line-height:1.3}
+.competitor-info span{color:#fff;font-weight:bold}
 .hidden{display:none}
+.recognition-banner{position:fixed;top:3.4rem;left:0;right:0;z-index:1;padding:10px 18px;text-align:center;background:#242424;border-bottom:2px solid #555}.recognition-banner.warning{border-color:#e6a800}.recognition-banner.primary{border-color:#0077cc}.recognition-banner.success{border-color:#28a745}.recognition-label{font-size:clamp(.95rem,2vw,2.3rem);font-weight:bold;text-transform:uppercase;letter-spacing:.08em}.recognition-countdown{font-size:clamp(2.7rem,8vw,10rem);font-weight:bold;font-variant-numeric:tabular-nums;line-height:1.05}.recognition-detail{color:#aaa;font-size:clamp(.75rem,1.3vw,1.5rem);margin-top:4px}
+@media (max-width:640px){
+  .estado-bar{font-size:1.05rem;letter-spacing:1px}
+  .info-row{gap:24px;margin-top:12px}
+  .competitor-info{gap:4px 16px;padding:10px 12px}
+}
 </style>
 </head>
 <body>
 
 <div id="estadoBar" class="estado-bar estado-idle">Aguardando</div>
+
+<div id="recognitionBanner" class="recognition-banner">
+  <div id="recognitionLabel" class="recognition-label">Aguardando reconhecimento de pista</div>
+  <div id="recognitionCountdown" class="recognition-countdown hidden">--:--</div>
+  <div id="recognitionDetail" class="recognition-detail">Aguardando liberação da pista.</div>
+</div>
 
 <div class="top-label">Tempo Oficial da Prova</div>
 <div id="topTimer" class="top-timer">00:00.000</div>
@@ -64,6 +76,11 @@ let lastSnapshotTime = 0;
 let ws = null;
 let reconnectTimer = null;
 let reconnectDelay = 500;
+let recognitionSnapshot = null;
+let recognitionSnapshotTime = 0;
+let recognitionWs = null;
+let recognitionReconnectTimer = null;
+let recognitionReconnectDelay = 500;
 
 function formatTime(seconds) {
   const m = Math.floor(seconds / 60);
@@ -104,6 +121,34 @@ function applyState(data) {
   }
 }
 
+function formatCountdown(seconds) {
+  const total = Math.max(0, Math.ceil(seconds));
+  return `${String(Math.floor(total / 60)).padStart(2,'0')}:${String(total % 60).padStart(2,'0')}`;
+}
+
+function recognitionRemaining() {
+  if (!recognitionSnapshot) return null;
+  const base = recognitionSnapshot.estado === 'reconhecimento'
+    ? recognitionSnapshot.reconhecimento_restante
+    : recognitionSnapshot.estado === 'intervalo' ? recognitionSnapshot.intervalo_restante : null;
+  return typeof base === 'number' ? Math.max(0, base - (performance.now() - recognitionSnapshotTime) / 1000) : null;
+}
+
+function setRecognitionSnapshot(data, authoritative=false) {
+  if (!data || (!authoritative && recognitionSnapshot && data.versao != null && recognitionSnapshot.versao != null && data.versao < recognitionSnapshot.versao)) return;
+  recognitionSnapshot = data;
+  recognitionSnapshotTime = performance.now();
+  const labels = {aguardando:'Aguardando reconhecimento de pista', reconhecimento:'Reconhecimento de pista', intervalo:'Intervalo antes da primeira entrada', liberado:'Pista liberada'};
+  const colors = {aguardando:'', reconhecimento:'warning', intervalo:'primary', liberado:'success'};
+  document.getElementById('recognitionBanner').className = `recognition-banner ${colors[data.estado] || ''}`;
+  document.getElementById('recognitionLabel').textContent = labels[data.estado] || data.estado;
+  const active = data.estado === 'reconhecimento' || data.estado === 'intervalo';
+  document.getElementById('recognitionCountdown').classList.toggle('hidden', !active);
+  document.getElementById('recognitionDetail').textContent = data.estado === 'liberado'
+    ? `Pista liberada para a prova #${data.id_prova}.`
+    : `Fase: ${data.estado} · Prova: ${data.id_prova ?? '—'}`;
+}
+
 function setSnapshot(data) {
   if (!data) return;
   if (lastSnapshot && data.versao != null && lastSnapshot.versao != null && data.versao < lastSnapshot.versao) return;
@@ -116,6 +161,8 @@ function renderFrame() {
   const vals = interpolate(lastSnapshot, lastSnapshotTime);
   document.getElementById('topTimer').textContent = vals.top;
   document.getElementById('tiaTimer').textContent = vals.tia;
+  const remaining = recognitionRemaining();
+  if (remaining !== null) document.getElementById('recognitionCountdown').textContent = formatCountdown(remaining);
   requestAnimationFrame(renderFrame);
 }
 
@@ -125,28 +172,60 @@ function wsUrl(path) {
 }
 
 function connectWebSocket() {
-  if (ws) ws.close();
+  if (ws) return;
   ws = new WebSocket(wsUrl('/ws/prova-ativa'));
+  let awaitingAuthoritativeSnapshot = true;
   ws.onopen = () => {
     reconnectDelay = 500;
     clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   };
   ws.onmessage = ev => {
-    const message = JSON.parse(ev.data);
-    if (message.tipo === 'estado') setSnapshot(message.data);
+    try {
+      const message = JSON.parse(ev.data);
+      if (message.tipo === 'estado' && message.data) {
+        if (awaitingAuthoritativeSnapshot) { lastSnapshot = null; awaitingAuthoritativeSnapshot = false; }
+        setSnapshot(message.data);
+      }
+    } catch (_) {}
   };
-  ws.onclose = scheduleReconnect;
+  ws.onclose = () => { ws = null; scheduleReconnect(); };
   ws.onerror = () => ws.close();
 }
 
 function scheduleReconnect() {
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connectWebSocket, reconnectDelay);
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connectWebSocket(); }, reconnectDelay);
   reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+}
+
+function connectRecognitionWebSocket() {
+  if (recognitionWs) return;
+  recognitionWs = new WebSocket(wsUrl('/ws/reconhecimento-pista'));
+  let awaitingAuthoritativeSnapshot = true;
+  recognitionWs.onopen = () => { recognitionReconnectDelay = 500; clearTimeout(recognitionReconnectTimer); recognitionReconnectTimer = null; };
+  recognitionWs.onmessage = ev => {
+    try {
+      const message = JSON.parse(ev.data);
+      if (message.tipo === 'estado_reconhecimento' && message.data) {
+        setRecognitionSnapshot(message.data, awaitingAuthoritativeSnapshot);
+        awaitingAuthoritativeSnapshot = false;
+      }
+    } catch (_) {}
+  };
+  recognitionWs.onclose = () => { recognitionWs = null; scheduleRecognitionReconnect(); };
+  recognitionWs.onerror = () => recognitionWs && recognitionWs.close();
+}
+
+function scheduleRecognitionReconnect() {
+  if (recognitionReconnectTimer) return;
+  recognitionReconnectTimer = setTimeout(() => { recognitionReconnectTimer = null; connectRecognitionWebSocket(); }, recognitionReconnectDelay);
+  recognitionReconnectDelay = Math.min(recognitionReconnectDelay * 2, 5000);
 }
 
 requestAnimationFrame(renderFrame);
 connectWebSocket();
+connectRecognitionWebSocket();
 </script>
 </body>
 </html>

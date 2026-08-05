@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>Agility - Operador</title>
+<title>Agility - Diretor de Prova</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#1a1a2e;color:#eee;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh;display:flex;flex-direction:column;padding:10px}
@@ -41,6 +41,7 @@ button:disabled{opacity:.3;cursor:not-allowed}
 .info-grid dt{color:#888}
 .info-grid dd{color:#ccc;font-weight:bold}
 .warn{color:#ff0;font-size:.85rem;text-align:center;margin:4px 0}
+.recognition-status{border-left:4px solid #666}.recognition-status.warning{border-color:#e6a800}.recognition-status.primary{border-color:#0077cc}.recognition-status.success{border-color:#28a745}.recognition-countdown{font-size:2.2rem;font-weight:bold;font-variant-numeric:tabular-nums;text-align:center;margin:8px 0}.recognition-note{font-size:.8rem;color:#aaa;line-height:1.35}.hidden{display:none}
 </style>
 </head>
 <body>
@@ -54,6 +55,23 @@ button:disabled{opacity:.3;cursor:not-allowed}
 <div class="timer-box">
   <div class="label">TIA – Tempo de Início Autorizado</div>
   <div id="tiaTimer" class="time" style="color:#aaa;font-size:1.4rem">00:00.000</div>
+</div>
+
+<div id="recognitionSection" class="section recognition-status">
+  <div class="section-title">Reconhecimento de pista</div>
+  <div id="recognitionLabel" class="estado estado-idle">Aguardando reconhecimento de pista</div>
+  <div id="recognitionCountdown" class="recognition-countdown hidden">--:--</div>
+  <div id="recognitionDetail" class="recognition-note">Aguardando a liberação do juiz e o acionamento pela secretaria.</div>
+  <label for="selProva" style="margin-top:10px">Prova</label>
+  <select id="selProva"><option value="">Carregando provas...</option></select>
+  <label for="recognitionMinutes">Duração (minutos, mínimo 7)</label>
+  <input id="recognitionMinutes" type="number" min="7" step="1" value="7">
+  <label><input id="judgeReleased" type="checkbox" style="width:auto;margin:0 6px 0 0">Confirmo que o juiz liberou a pista antes do acionamento pela secretaria.</label>
+  <div class="btn-row" style="margin-top:10px">
+    <button class="btn-warning" id="btnStartRecognition">Iniciar reconhecimento</button>
+    <button class="btn-danger" id="btnCancelRecognition" disabled>Cancelar reconhecimento</button>
+    <button class="btn-secondary" id="btnResetRecognition" disabled>Resetar reconhecimento</button>
+  </div>
 </div>
 
 <div class="section" id="secSelecao">
@@ -117,6 +135,11 @@ let lastSnapshotTime = 0;
 let ws = null;
 let reconnectTimer = null;
 let reconnectDelay = 500;
+let recognitionSnapshot = null;
+let recognitionSnapshotTime = 0;
+let recognitionWs = null;
+let recognitionReconnectTimer = null;
+let recognitionReconnectDelay = 500;
 
 function formatTime(s){const m=Math.floor(s/60);const sec=Math.floor(s%60);const ms=Math.floor((s-Math.floor(s))*1000);return `${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;}
 function interpolate(base,at){if(!base)return{tia:'00:00.000',top:'00:00.000'};const el=(performance.now()-at)/1000;let tia=base.tia_decorrido,top=base.top_decorrido;if(base.estado==='autorizado')tia+=el;if(base.estado==='rodando')top+=el;return{tia:formatTime(tia),top:formatTime(top)};}
@@ -147,9 +170,67 @@ async function loadInscricoes(){
   } catch(_){}
 }
 
+async function loadProvas(){
+  try {
+    const r = await fetch('/provas/', {cache:'no-store'});
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const list = await r.json();
+    const sel = $('selProva');
+    sel.innerHTML = '<option value="">-- Selecione a prova --</option>';
+    list.forEach(prova => {
+      const opt = document.createElement('option');
+      opt.value = prova.id_prova;
+      opt.textContent = `#${prova.id_prova} - ${prova.categoria} ${prova.classe}`;
+      sel.appendChild(opt);
+    });
+  } catch (error) {
+    $('selProva').innerHTML = '<option value="">Falha ao carregar provas</option>';
+    $('recognitionDetail').textContent = `Não foi possível carregar as provas: ${error.message || error}`;
+  }
+}
+
+function formatCountdown(seconds){
+  const total = Math.max(0, Math.ceil(seconds));
+  return `${String(Math.floor(total / 60)).padStart(2,'0')}:${String(total % 60).padStart(2,'0')}`;
+}
+
+function recognitionRemaining(){
+  if (!recognitionSnapshot) return null;
+  const base = recognitionSnapshot.estado === 'reconhecimento'
+    ? recognitionSnapshot.reconhecimento_restante
+    : recognitionSnapshot.estado === 'intervalo' ? recognitionSnapshot.intervalo_restante : null;
+  return typeof base === 'number' ? Math.max(0, base - (performance.now() - recognitionSnapshotTime) / 1000) : null;
+}
+
+function applyRecognitionState(data){
+  const labels = {aguardando:'Aguardando reconhecimento de pista', reconhecimento:'Reconhecimento de pista', intervalo:'Intervalo antes da primeira entrada', liberado:'Pista liberada'};
+  const colors = {aguardando:'secondary', reconhecimento:'warning', intervalo:'primary', liberado:'success'};
+  const label = $('recognitionLabel');
+  label.className = `estado estado-${colors[data.estado] || 'idle'}`;
+  label.textContent = labels[data.estado] || data.estado;
+  $('recognitionSection').className = `section recognition-status ${colors[data.estado] || 'secondary'}`;
+  const active = data.estado === 'reconhecimento' || data.estado === 'intervalo';
+  $('recognitionCountdown').classList.toggle('hidden', !active);
+  $('recognitionDetail').textContent = data.estado === 'liberado'
+    ? `Pista liberada para a prova #${data.id_prova}.`
+    : `Fase: ${data.estado} · Prova: ${data.id_prova ?? '—'}`;
+  $('btnStartRecognition').disabled = data.estado !== 'aguardando';
+  $('btnCancelRecognition').disabled = !active;
+  $('btnResetRecognition').disabled = active || data.id_reconhecimento == null;
+  updateButtons(lastSnapshot ? lastSnapshot.estado : 'idle');
+}
+
+function setRecognitionSnapshot(data, authoritative=false){
+  if (!data || (!authoritative && recognitionSnapshot && data.versao != null && recognitionSnapshot.versao != null && data.versao < recognitionSnapshot.versao)) return;
+  recognitionSnapshot = data;
+  recognitionSnapshotTime = performance.now();
+  applyRecognitionState(data);
+}
+
 function updateButtons(estado){
   $('btnPreparar').disabled = (estado==='rodando'||estado==='autorizado');
-  $('btnAutorizar').disabled = estado!=='preparado';
+  const releasedForPreparedProva = recognitionSnapshot && recognitionSnapshot.estado === 'liberado' && recognitionSnapshot.id_prova === (lastSnapshot && lastSnapshot.id_prova);
+  $('btnAutorizar').disabled = estado!=='preparado' || !releasedForPreparedProva;
   $('btnSimular').disabled = !(estado==='autorizado'||estado==='rodando');
   $('btnForcarFim').disabled = estado!=='rodando';
   $('btnConfirmar').disabled = estado!=='finalizado';
@@ -191,6 +272,8 @@ function renderFrame(){
   const v=interpolate(lastSnapshot,lastSnapshotTime);
   $('topTimer').textContent=v.top;
   $('tiaTimer').textContent=v.tia;
+  const remaining = recognitionRemaining();
+  if (remaining !== null) $('recognitionCountdown').textContent = formatCountdown(remaining);
   requestAnimationFrame(renderFrame);
 }
 
@@ -200,24 +283,79 @@ function wsUrl(path){
 }
 
 function connectWebSocket(){
-  if(ws) ws.close();
+  if(ws) return;
   ws = new WebSocket(wsUrl('/ws/prova-ativa'));
+  let awaitingAuthoritativeSnapshot = true;
   ws.onopen = ()=>{
     reconnectDelay = 500;
     clearTimeout(reconnectTimer);
+    reconnectTimer = null;
   };
   ws.onmessage = ev=>{
-    const message = JSON.parse(ev.data);
-    if(message.tipo === 'estado') setSnapshot(message.data);
+    try {
+      const message = JSON.parse(ev.data);
+      if(message.tipo === 'estado' && message.data) {
+        if (awaitingAuthoritativeSnapshot) {
+          lastSnapshot = null;
+          awaitingAuthoritativeSnapshot = false;
+        }
+        setSnapshot(message.data);
+      }
+    } catch (_) {}
   };
-  ws.onclose = scheduleReconnect;
+  ws.onclose = ()=>{ws=null;scheduleReconnect();};
   ws.onerror = ()=>ws.close();
 }
 
 function scheduleReconnect(){
-  clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connectWebSocket, reconnectDelay);
+  if(reconnectTimer) return;
+  reconnectTimer = setTimeout(()=>{reconnectTimer=null;connectWebSocket();}, reconnectDelay);
   reconnectDelay = Math.min(reconnectDelay * 2, 5000);
+}
+
+function connectRecognitionWebSocket(){
+  if (recognitionWs) return;
+  recognitionWs = new WebSocket(wsUrl('/ws/reconhecimento-pista'));
+  let awaitingAuthoritativeSnapshot = true;
+  recognitionWs.onopen = ()=>{recognitionReconnectDelay=500;clearTimeout(recognitionReconnectTimer);recognitionReconnectTimer=null;};
+  recognitionWs.onmessage = ev=>{
+    try {
+      const message = JSON.parse(ev.data);
+      if(message.tipo === 'estado_reconhecimento' && message.data) {
+        setRecognitionSnapshot(message.data, awaitingAuthoritativeSnapshot);
+        awaitingAuthoritativeSnapshot = false;
+      }
+    } catch (_) {}
+  };
+  recognitionWs.onclose = ()=>{recognitionWs=null;scheduleRecognitionReconnect();};
+  recognitionWs.onerror = ()=>recognitionWs && recognitionWs.close();
+}
+
+function scheduleRecognitionReconnect(){
+  if(recognitionReconnectTimer) return;
+  recognitionReconnectTimer=setTimeout(()=>{recognitionReconnectTimer=null;connectRecognitionWebSocket();},recognitionReconnectDelay);
+  recognitionReconnectDelay=Math.min(recognitionReconnectDelay*2,5000);
+}
+
+async function recognitionAction(url, body){
+  try {
+    const response = await fetch(url, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      cache:'no-store',
+      body:JSON.stringify(body || {}),
+    });
+    if(!response.ok){
+      const error = await response.json().catch(()=>({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    const data = await response.json().catch(()=>null);
+    if (data) setRecognitionSnapshot(data, true);
+    return true;
+  } catch(error) {
+    alert(`Erro no reconhecimento: ${error.message || error}`);
+    return false;
+  }
 }
 
 $('btnPreparar').onclick = async()=>{
@@ -238,10 +376,26 @@ $('btnFaltaPlus').onclick = ()=>postJson('/prova-ativa/falta');
 $('btnFaltaMinus').onclick = ()=>postJson('/prova-ativa/desfazer-falta');
 $('btnRecusaPlus').onclick = ()=>postJson('/prova-ativa/recusa');
 $('btnRecusaMinus').onclick = ()=>postJson('/prova-ativa/desfazer-recusa');
+$('btnStartRecognition').onclick = ()=>{
+  const idProva = Number($('selProva').value);
+  const minutes = Number($('recognitionMinutes').value);
+  if(!Number.isInteger(idProva) || idProva <= 0){alert('Selecione a prova para o reconhecimento.');return;}
+  if(!Number.isInteger(minutes) || minutes < 7){alert('Informe pelo menos 7 minutos inteiros.');return;}
+  if(!$('judgeReleased').checked){alert('Confirme que o juiz liberou a pista antes de iniciar.');return;}
+  recognitionAction('/reconhecimento-pista/iniciar',{id_prova:idProva,duracao_segundos:minutes*60});
+};
+$('btnCancelRecognition').onclick = ()=>{
+  if(confirm('Cancelar o reconhecimento? Uma nova sessão deverá cumprir todos os períodos.')) recognitionAction('/reconhecimento-pista/cancelar');
+};
+$('btnResetRecognition').onclick = ()=>{
+  if(confirm('Resetar a sessão e remover a liberação operacional da pista?')) recognitionAction('/reconhecimento-pista/reset');
+};
 
 requestAnimationFrame(renderFrame);
 loadInscricoes();
+loadProvas();
 connectWebSocket();
+connectRecognitionWebSocket();
 </script>
 </body>
 </html>
