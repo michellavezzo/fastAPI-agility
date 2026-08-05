@@ -111,6 +111,19 @@ def test_restore_recomputes_interval_from_wall_time():
     assert timer.get_state()["intervalo_restante"] == pytest.approx(120)
 
 
+def test_restore_rejects_interval_different_from_three_minutes():
+    timer = CourseRecognitionTimer(clock=FakeClock())
+
+    with pytest.raises(ValueError, match="180"):
+        timer.restore(
+            id_prova=7,
+            session_id=3,
+            duration_seconds=420,
+            interval_seconds=179,
+            started_at=datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc),
+        )
+
+
 def test_restore_counts_only_remaining_interval_with_monotonic_clock():
     clock = FakeClock()
     timer = CourseRecognitionTimer(

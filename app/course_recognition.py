@@ -60,6 +60,8 @@ class CourseRecognitionTimer:
     ) -> dict:
         if duration_seconds < MIN_RECOGNITION_SECONDS:
             raise ValueError(f"duration_seconds must be at least {MIN_RECOGNITION_SECONDS}")
+        if interval_seconds != PRE_START_INTERVAL_SECONDS:
+            raise ValueError(f"interval_seconds must equal {PRE_START_INTERVAL_SECONDS}")
 
         with self._lock:
             version = self._state["versao"] + 1
