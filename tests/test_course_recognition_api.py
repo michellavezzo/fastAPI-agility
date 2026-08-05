@@ -1,9 +1,12 @@
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from app import main, models
@@ -39,6 +42,9 @@ def client(tmp_path, monkeypatch):
     clock = FakeClock()
     timer = CourseRecognitionTimer(clock=clock)
     monkeypatch.setattr(main, "_course_recognition", timer, raising=False)
+    monkeypatch.setattr(main, "_course_recognition_listener_timer", None, raising=False)
+    monkeypatch.setattr(main, "_course_recognition_last_persisted_version", None, raising=False)
+    monkeypatch.setattr(main, "_course_recognition_task", None, raising=False)
     monkeypatch.setattr(main, "_chrono", Chronometer(sensor_require_ready=False))
     monkeypatch.setattr(main, "SessionLocal", TestingSession, raising=False)
     main.app.dependency_overrides[get_db] = override_get_db
@@ -276,3 +282,163 @@ def test_authorization_without_prepared_enrollment_keeps_chronometer_error(clien
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Estado inválido para autorizar"
+
+
+def test_start_rejects_when_the_previous_recognition_is_released(client, prova):
+    http, Session, timer, clock = client
+    timer.start(prova.id_prova, session_id=99, duration_seconds=420)
+    clock.advance(600)
+    timer.tick()
+
+    response = http.post(
+        "/reconhecimento-pista/iniciar",
+        json={"id_prova": prova.id_prova, "duracao_segundos": 420},
+    )
+
+    assert response.status_code == 409
+    with Session() as db:
+        assert db.query(models.ReconhecimentoPista).count() == 0
+
+
+def test_concurrent_starts_create_exactly_one_recognition(client, prova, monkeypatch):
+    http, Session, _, _ = client
+    original_create = main.crud.create_course_recognition
+    first_create_entered = Event()
+    allow_first_create = Event()
+    calls = 0
+
+    def delayed_create(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_create_entered.set()
+            assert allow_first_create.wait(timeout=2)
+        return original_create(*args, **kwargs)
+
+    monkeypatch.setattr(main.crud, "create_course_recognition", delayed_create)
+    payload = {"id_prova": prova.id_prova, "duracao_segundos": 420}
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(http.post, "/reconhecimento-pista/iniciar", json=payload)
+        assert first_create_entered.wait(timeout=2)
+        second = executor.submit(http.post, "/reconhecimento-pista/iniciar", json=payload)
+        allow_first_create.set()
+        statuses = sorted([first.result(timeout=3).status_code, second.result(timeout=3).status_code])
+
+    assert statuses == [200, 409]
+    with Session() as db:
+        assert db.query(models.ReconhecimentoPista).count() == 1
+
+
+def test_background_tick_persists_the_released_transition(client, prova):
+    http, Session, _, clock = client
+    assert http.post(
+        "/reconhecimento-pista/iniciar",
+        json={"id_prova": prova.id_prova, "duracao_segundos": 420},
+    ).status_code == 200
+
+    clock.advance(600)
+    time.sleep(0.3)
+
+    with Session() as db:
+        row = db.query(models.ReconhecimentoPista).one()
+        assert row.status == "liberado"
+        assert row.liberado_em is not None
+
+
+def test_reset_of_released_recognition_is_terminal_after_restart(client, prova, monkeypatch):
+    http, Session, _, clock = client
+    assert http.post(
+        "/reconhecimento-pista/iniciar",
+        json={"id_prova": prova.id_prova, "duracao_segundos": 420},
+    ).status_code == 200
+    clock.advance(600)
+    time.sleep(0.3)
+
+    assert http.post("/reconhecimento-pista/reset").json()["estado"] == "aguardando"
+    with Session() as db:
+        row = db.query(models.ReconhecimentoPista).one()
+        assert row.status == "cancelado"
+        assert row.cancelado_em is not None
+
+    monkeypatch.setattr(main, "_course_recognition", CourseRecognitionTimer(clock=FakeClock()))
+    monkeypatch.setattr(main, "_course_recognition_listener_timer", None, raising=False)
+    assert main.restore_course_recognition()["estado"] == "aguardando"
+
+
+def test_newest_cancelled_session_never_restores_an_older_release(client, prova, monkeypatch):
+    _, Session, _, _ = client
+    now = datetime.now(timezone.utc)
+    with Session() as db:
+        older = models.ReconhecimentoPista(
+            id_prova=prova.id_prova,
+            duracao_segundos=420,
+            intervalo_segundos=180,
+            status="liberado",
+            iniciado_em=now - timedelta(seconds=600),
+            reconhecimento_finalizado_em=now - timedelta(seconds=180),
+            liberado_em=now,
+        )
+        newer = models.ReconhecimentoPista(
+            id_prova=prova.id_prova,
+            duracao_segundos=420,
+            intervalo_segundos=180,
+            status="cancelado",
+            iniciado_em=now,
+            cancelado_em=now,
+        )
+        db.add_all([older, newer])
+        db.commit()
+
+    monkeypatch.setattr(main, "_course_recognition", CourseRecognitionTimer(clock=FakeClock()))
+    monkeypatch.setattr(main, "_course_recognition_listener_timer", None, raising=False)
+    assert main.restore_course_recognition()["estado"] == "aguardando"
+
+
+def test_restore_immediately_synchronizes_expired_session_to_database(client, prova, monkeypatch):
+    _, Session, _, _ = client
+    now = datetime.now(timezone.utc)
+    with Session() as db:
+        recognition = models.ReconhecimentoPista(
+            id_prova=prova.id_prova,
+            duracao_segundos=420,
+            intervalo_segundos=180,
+            status="reconhecimento",
+            iniciado_em=now - timedelta(seconds=600),
+        )
+        db.add(recognition)
+        db.commit()
+        recognition_id = recognition.id_reconhecimento
+
+    monkeypatch.setattr(main, "_course_recognition", CourseRecognitionTimer(clock=FakeClock()))
+    monkeypatch.setattr(main, "_course_recognition_listener_timer", None, raising=False)
+    restored = main.restore_course_recognition()
+
+    assert restored["estado"] == "liberado"
+    with Session() as db:
+        row = db.get(models.ReconhecimentoPista, recognition_id)
+        assert row.status == "liberado"
+        assert row.reconhecimento_finalizado_em is not None
+        assert row.liberado_em is not None
+
+
+def test_prepared_state_exposes_its_prova_id(client, prova, inscricao):
+    http, _, _, _ = client
+
+    response = http.post("/prova-ativa/preparar", json={"id_inscricao": inscricao.id_inscricao})
+
+    assert response.status_code == 200
+    assert response.json()["id_prova"] == prova.id_prova
+
+
+def test_persisted_recognition_enforces_regulatory_database_constraints(client, prova):
+    _, Session, _, _ = client
+    with Session() as db:
+        db.add(models.ReconhecimentoPista(
+            id_prova=prova.id_prova,
+            duracao_segundos=419,
+            intervalo_segundos=179,
+            status="aguardando",
+            iniciado_em=datetime.now(timezone.utc),
+        ))
+        with pytest.raises(IntegrityError):
+            db.commit()

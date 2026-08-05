@@ -101,7 +101,6 @@ def delete_prova(db: Session, prova_id: int):
 def get_latest_course_recognition(db: Session):
     return (
         db.query(ReconhecimentoPista)
-        .filter(ReconhecimentoPista.status != "cancelado")
         .order_by(ReconhecimentoPista.id_reconhecimento.desc())
         .first()
     )

@@ -1,6 +1,6 @@
 # app/models.py
 
-from sqlalchemy import Boolean, Column, Date, Integer, Float, String, DateTime, ForeignKey, func
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, Integer, Float, String, DateTime, ForeignKey, func
 from sqlalchemy.orm import relationship
 from .database import Base
 class User(Base):
@@ -47,6 +47,14 @@ class Prova(Base):
 
 class ReconhecimentoPista(Base):
     __tablename__ = "reconhecimento_pista"
+    __table_args__ = (
+        CheckConstraint("duracao_segundos >= 420", name="ck_reconhecimento_duracao_minima"),
+        CheckConstraint("intervalo_segundos = 180", name="ck_reconhecimento_intervalo_fixo"),
+        CheckConstraint(
+            "status IN ('reconhecimento', 'intervalo', 'liberado', 'cancelado')",
+            name="ck_reconhecimento_status_valido",
+        ),
+    )
 
     id_reconhecimento = Column(Integer, primary_key=True, index=True)
     id_prova = Column(Integer, ForeignKey("prova.id_prova"), nullable=False, index=True)

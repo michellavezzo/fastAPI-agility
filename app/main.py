@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import asyncio
 import logging
+import threading
 from fastapi import FastAPI, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -72,6 +73,7 @@ _course_recognition = None
 _course_recognition_listener_timer = None
 _course_recognition_task = None
 _course_recognition_last_persisted_version = None
+_course_recognition_start_lock = threading.RLock()
 STATIC_DIR = FilePath(__file__).resolve().parent.parent / "static"
 
 
@@ -229,13 +231,21 @@ def restore_course_recognition():
         recognition = crud.get_latest_course_recognition(db)
         if recognition is None:
             return timer.get_state()
-        return timer.restore(
+        state = timer.restore(
             id_prova=recognition.id_prova,
             session_id=recognition.id_reconhecimento,
             duration_seconds=recognition.duracao_segundos,
             interval_seconds=recognition.intervalo_segundos,
             started_at=crud.as_utc(recognition.iniciado_em),
+            cancelled_at=(
+                crud.as_utc(recognition.cancelado_em)
+                if recognition.cancelado_em is not None
+                else None
+            ),
         )
+        if state["id_reconhecimento"] is not None:
+            crud.update_course_recognition_state(db, state)
+        return state
 
 
 async def course_recognition_tick_loop():
@@ -581,30 +591,33 @@ def iniciar_reconhecimento_pista(
     body: schemas.ReconhecimentoPistaIniciar,
     db: Session = Depends(get_db),
 ):
-    prova = crud.get_prova(db, body.id_prova)
-    if prova is None:
-        raise HTTPException(status_code=404, detail="Prova não encontrada")
-    timer = get_course_recognition()
-    if timer.get_state()["estado"] in ("reconhecimento", "intervalo"):
-        raise HTTPException(status_code=409, detail="Já existe reconhecimento de pista em andamento")
-    recognition = crud.create_course_recognition(
-        db,
-        id_prova=body.id_prova,
-        duration_seconds=body.duracao_segundos,
-        started_at=datetime.now(timezone.utc),
-    )
-    try:
-        state = timer.start(
+    with _course_recognition_start_lock:
+        prova = crud.get_prova(db, body.id_prova)
+        if prova is None:
+            raise HTTPException(status_code=404, detail="Prova não encontrada")
+        timer = get_course_recognition()
+        if timer.get_state()["estado"] != "aguardando":
+            raise HTTPException(
+                status_code=409,
+                detail="Uma sessão de reconhecimento de pista deve ser limpa antes de iniciar outra.",
+            )
+        recognition = crud.create_course_recognition(
+            db,
             id_prova=body.id_prova,
-            session_id=recognition.id_reconhecimento,
             duration_seconds=body.duracao_segundos,
-            started_at=crud.as_utc(recognition.iniciado_em),
+            started_at=datetime.now(timezone.utc),
         )
-    except Exception:
-        db.delete(recognition)
-        db.commit()
-        raise
-    return state
+        try:
+            return timer.start(
+                id_prova=body.id_prova,
+                session_id=recognition.id_reconhecimento,
+                duration_seconds=body.duracao_segundos,
+                started_at=crud.as_utc(recognition.iniciado_em),
+            )
+        except Exception:
+            db.delete(recognition)
+            db.commit()
+            raise
 
 
 @app.get("/reconhecimento-pista/estado", response_model=schemas.ReconhecimentoPistaEstado)
@@ -628,12 +641,20 @@ def cancelar_reconhecimento_pista(db: Session = Depends(get_db)):
 
 
 @app.post("/reconhecimento-pista/reset", response_model=schemas.ReconhecimentoPistaEstado)
-def resetar_reconhecimento_pista():
+def resetar_reconhecimento_pista(db: Session = Depends(get_db)):
     timer = get_course_recognition()
-    if timer.get_state()["estado"] in ("reconhecimento", "intervalo"):
+    active_state = timer.get_state()
+    if active_state["estado"] in ("reconhecimento", "intervalo"):
         raise HTTPException(
             status_code=409,
             detail="Reconhecimento de pista em andamento deve ser cancelado antes do reset.",
+        )
+    if active_state["id_reconhecimento"] is not None:
+        # Reset invalida operacionalmente uma liberação concluída para que ela não sobreviva ao reinício.
+        crud.cancel_course_recognition(
+            db,
+            session_id=active_state["id_reconhecimento"],
+            cancelled_at=datetime.now(timezone.utc).isoformat(),
         )
     return timer.reset()
 
