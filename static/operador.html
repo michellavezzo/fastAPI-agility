@@ -17,6 +17,10 @@ h2{text-align:center;font-size:1.1rem;color:#888;margin-bottom:8px}
 .estado-autorizado{background:#0077cc;color:#fff}
 .estado-rodando{background:#c00;color:#fff}
 .estado-finalizado{background:#090;color:#fff}
+.estado-secondary{background:#555;color:#fff}
+.estado-warning{background:#e6a800;color:#000}
+.estado-primary{background:#0077cc;color:#fff}
+.estado-success{background:#28a745;color:#fff}
 .section{background:#222;padding:10px;border-radius:8px;margin-bottom:10px}
 .section-title{font-size:.85rem;color:#888;margin-bottom:6px;text-transform:uppercase}
 label{display:block;font-size:.8rem;color:#aaa;margin-bottom:4px}
@@ -284,14 +288,17 @@ function wsUrl(path){
 
 function connectWebSocket(){
   if(ws) return;
-  ws = new WebSocket(wsUrl('/ws/prova-ativa'));
+  const provaSocket = new WebSocket(wsUrl('/ws/prova-ativa'));
+  ws = provaSocket;
   let awaitingAuthoritativeSnapshot = true;
-  ws.onopen = ()=>{
+  provaSocket.onopen = ()=>{
+    if (ws !== provaSocket) return;
     reconnectDelay = 500;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   };
-  ws.onmessage = ev=>{
+  provaSocket.onmessage = ev=>{
+    if (ws !== provaSocket) return;
     try {
       const message = JSON.parse(ev.data);
       if(message.tipo === 'estado' && message.data) {
@@ -303,8 +310,15 @@ function connectWebSocket(){
       }
     } catch (_) {}
   };
-  ws.onclose = ()=>{ws=null;scheduleReconnect();};
-  ws.onerror = ()=>ws.close();
+  provaSocket.onclose = ()=>{
+    if (ws !== provaSocket) return;
+    ws=null;
+    scheduleReconnect();
+  };
+  provaSocket.onerror = ()=>{
+    if (ws !== provaSocket) return;
+    provaSocket.close();
+  };
 }
 
 function scheduleReconnect(){
@@ -315,10 +329,17 @@ function scheduleReconnect(){
 
 function connectRecognitionWebSocket(){
   if (recognitionWs) return;
-  recognitionWs = new WebSocket(wsUrl('/ws/reconhecimento-pista'));
+  const recognitionSocket = new WebSocket(wsUrl('/ws/reconhecimento-pista'));
+  recognitionWs = recognitionSocket;
   let awaitingAuthoritativeSnapshot = true;
-  recognitionWs.onopen = ()=>{recognitionReconnectDelay=500;clearTimeout(recognitionReconnectTimer);recognitionReconnectTimer=null;};
-  recognitionWs.onmessage = ev=>{
+  recognitionSocket.onopen = ()=>{
+    if (recognitionWs !== recognitionSocket) return;
+    recognitionReconnectDelay=500;
+    clearTimeout(recognitionReconnectTimer);
+    recognitionReconnectTimer=null;
+  };
+  recognitionSocket.onmessage = ev=>{
+    if (recognitionWs !== recognitionSocket) return;
     try {
       const message = JSON.parse(ev.data);
       if(message.tipo === 'estado_reconhecimento' && message.data) {
@@ -327,8 +348,15 @@ function connectRecognitionWebSocket(){
       }
     } catch (_) {}
   };
-  recognitionWs.onclose = ()=>{recognitionWs=null;scheduleRecognitionReconnect();};
-  recognitionWs.onerror = ()=>recognitionWs && recognitionWs.close();
+  recognitionSocket.onclose = ()=>{
+    if (recognitionWs !== recognitionSocket) return;
+    recognitionWs=null;
+    scheduleRecognitionReconnect();
+  };
+  recognitionSocket.onerror = ()=>{
+    if (recognitionWs !== recognitionSocket) return;
+    recognitionSocket.close();
+  };
 }
 
 function scheduleRecognitionReconnect(){
@@ -350,7 +378,7 @@ async function recognitionAction(url, body){
       throw new Error(error.detail || `HTTP ${response.status}`);
     }
     const data = await response.json().catch(()=>null);
-    if (data) setRecognitionSnapshot(data, true);
+    if (data) setRecognitionSnapshot(data);
     return true;
   } catch(error) {
     alert(`Erro no reconhecimento: ${error.message || error}`);

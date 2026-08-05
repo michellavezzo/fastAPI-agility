@@ -6,31 +6,59 @@
 <title>Agility - Painel Público</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#111;color:#eee;font-family:'Segoe UI',Arial,sans-serif;overflow:hidden;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.estado-bar{position:fixed;top:0;left:0;right:0;text-align:center;padding:8px;font-size:1.4rem;font-weight:bold;text-transform:uppercase;letter-spacing:2px}
+body{background:#111;color:#eee;font-family:'Segoe UI',Arial,sans-serif;overflow:hidden;height:100vh;height:100dvh;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto}
+.estado-bar{position:relative;z-index:2;width:100%;min-height:2.8rem;text-align:center;padding:8px 16px;font-size:1.4rem;font-weight:bold;text-transform:uppercase;letter-spacing:2px}
 .estado-idle{background:#333;color:#999}
 .estado-preparado{background:#e6a800;color:#000}
 .estado-autorizado{background:#0077cc;color:#fff}
 .estado-rodando{background:#c00;color:#fff;animation:pulse 1s infinite}
 .estado-finalizado{background:#090;color:#fff}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.7}}
-.top-timer{font-size:clamp(3.4rem,15vw,21rem);font-weight:bold;font-variant-numeric:tabular-nums;letter-spacing:.05em;line-height:1;margin:10px 0}
-.tia-timer{font-size:clamp(1.5rem,5vw,7.5rem);color:#ccc;font-variant-numeric:tabular-nums}
+.timing-content{min-height:0;width:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;overflow:hidden;padding:10px 18px}
+.top-timer{font-size:clamp(3.4rem,15vw,21rem);font-weight:bold;font-variant-numeric:tabular-nums;letter-spacing:.05em;line-height:1;margin:10px 0;transition:font-size .2s,color .2s,opacity .2s}
+.tia-timer{font-size:clamp(1.5rem,5vw,7.5rem);color:#ccc;font-variant-numeric:tabular-nums;transition:font-size .2s,color .2s,opacity .2s}
 .tia-label,.top-label{font-size:clamp(.9rem,2.2vw,3.2rem);color:#8a8a8a;text-transform:uppercase;letter-spacing:3px}
-.info-row{display:flex;gap:40px;margin-top:20px}
+.info-row{display:flex;gap:40px;margin-top:20px;transition:opacity .2s,transform .2s}
 .info-item{text-align:center}
 .info-item .val{font-size:clamp(2rem,4.5vw,6.5rem);font-weight:bold}
 .info-item .lbl{font-size:clamp(.85rem,1.7vw,2.4rem);color:#8a8a8a;text-transform:uppercase}
 .faltas .val{color:#f80}
 .recusas .val{color:#e44}
-.competitor-info{position:fixed;bottom:0;left:0;right:0;display:flex;justify-content:center;flex-wrap:wrap;gap:8px 44px;padding:16px 24px;background:rgba(0,0,0,.7);font-size:clamp(1.05rem,2.6vw,3.6rem);color:#bbb;line-height:1.3}
+.competitor-info{position:relative;z-index:2;width:100%;display:flex;justify-content:center;flex-wrap:wrap;gap:8px 44px;padding:16px 24px;background:rgba(0,0,0,.7);font-size:clamp(1.05rem,2.6vw,3.6rem);color:#bbb;line-height:1.3}
 .competitor-info span{color:#fff;font-weight:bold}
 .hidden{display:none}
-.recognition-banner{position:fixed;top:3.4rem;left:0;right:0;z-index:1;padding:10px 18px;text-align:center;background:#242424;border-bottom:2px solid #555}.recognition-banner.warning{border-color:#e6a800}.recognition-banner.primary{border-color:#0077cc}.recognition-banner.success{border-color:#28a745}.recognition-label{font-size:clamp(.95rem,2vw,2.3rem);font-weight:bold;text-transform:uppercase;letter-spacing:.08em}.recognition-countdown{font-size:clamp(2.7rem,8vw,10rem);font-weight:bold;font-variant-numeric:tabular-nums;line-height:1.05}.recognition-detail{color:#aaa;font-size:clamp(.75rem,1.3vw,1.5rem);margin-top:4px}
+.recognition-banner{position:relative;z-index:1;width:100%;padding:10px 18px;text-align:center;background:#242424;border-bottom:3px solid #777;box-shadow:0 4px 12px rgba(0,0,0,.25)}
+.recognition-banner.estado-secondary{border-color:#777}
+.recognition-banner.estado-warning{border-color:#e6a800}
+.recognition-banner.estado-primary{border-color:#0077cc}
+.recognition-banner.estado-success{border-color:#28a745}
+.recognition-label{font-size:clamp(.95rem,2vw,2.3rem);font-weight:bold;text-transform:uppercase;letter-spacing:.08em}
+.recognition-countdown{font-size:clamp(2.7rem,8vw,10rem);font-weight:bold;font-variant-numeric:tabular-nums;line-height:1.05}
+.recognition-detail{color:#aaa;font-size:clamp(.75rem,1.3vw,1.5rem);margin-top:4px}
+body.recognition-active .recognition-banner{padding-block:12px;background:#1e1e1e;box-shadow:0 6px 18px rgba(0,0,0,.45)}
+body.recognition-active .recognition-countdown{font-size:clamp(4.5rem,11vw,11rem)}
+body.recognition-active .top-timer{font-size:clamp(3rem,9vw,8rem);color:#aaa;opacity:.68}
+body.recognition-active .tia-timer{font-size:clamp(1.35rem,3vw,3rem);color:#888;opacity:.65}
+body.recognition-active .tia-label,body.recognition-active .top-label{color:#666}
+body.recognition-active .info-row{opacity:.68;transform:scale(.88);margin-top:12px}
 @media (max-width:640px){
-  .estado-bar{font-size:1.05rem;letter-spacing:1px}
+  .estado-bar{min-height:2.35rem;padding:7px 8px;font-size:1rem;letter-spacing:1px}
+  .recognition-banner{padding:8px 10px}
+  .recognition-label{font-size:.82rem;letter-spacing:.05em}
+  .recognition-detail{font-size:.72rem}
+  .recognition-countdown{font-size:clamp(3rem,18vw,4.5rem)}
+  .timing-content{padding:8px 10px}
+  .top-timer{font-size:clamp(3.4rem,16.5vw,4.2rem);letter-spacing:.015em;margin:8px 0}
+  .tia-timer{font-size:clamp(1.5rem,7vw,2rem)}
+  .tia-label,.top-label{font-size:.78rem;letter-spacing:1.5px}
   .info-row{gap:24px;margin-top:12px}
-  .competitor-info{gap:4px 16px;padding:10px 12px}
+  .info-item .val{font-size:2rem}
+  .info-item .lbl{font-size:.72rem}
+  .competitor-info{gap:4px 16px;padding:8px 10px;font-size:.86rem}
+  body.recognition-active .recognition-banner{padding-block:9px}
+  body.recognition-active .recognition-countdown{font-size:clamp(4rem,21vw,5.25rem)}
+  body.recognition-active .top-timer{font-size:clamp(2.5rem,12vw,3.2rem)}
+  body.recognition-active .tia-timer{font-size:clamp(1.25rem,5.5vw,1.6rem)}
 }
 </style>
 </head>
@@ -38,22 +66,24 @@ body{background:#111;color:#eee;font-family:'Segoe UI',Arial,sans-serif;overflow
 
 <div id="estadoBar" class="estado-bar estado-idle">Aguardando</div>
 
-<div id="recognitionBanner" class="recognition-banner">
+<div id="recognitionBanner" class="recognition-banner estado-secondary">
   <div id="recognitionLabel" class="recognition-label">Aguardando reconhecimento de pista</div>
   <div id="recognitionCountdown" class="recognition-countdown hidden">--:--</div>
   <div id="recognitionDetail" class="recognition-detail">Aguardando liberação da pista.</div>
 </div>
 
-<div class="top-label">Tempo Oficial da Prova</div>
-<div id="topTimer" class="top-timer">00:00.000</div>
+<main class="timing-content">
+  <div class="top-label">Tempo Oficial da Prova</div>
+  <div id="topTimer" class="top-timer">00:00.000</div>
 
-<div class="tia-label">Tempo de Início Autorizado</div>
-<div id="tiaTimer" class="tia-timer">00:00.000</div>
+  <div class="tia-label">Tempo de Início Autorizado</div>
+  <div id="tiaTimer" class="tia-timer">00:00.000</div>
 
-<div class="info-row">
-  <div class="info-item faltas"><div id="faltas" class="val">0</div><div class="lbl">Faltas</div></div>
-  <div class="info-item recusas"><div id="recusas" class="val">0</div><div class="lbl">Recusas</div></div>
-</div>
+  <div class="info-row">
+    <div class="info-item faltas"><div id="faltas" class="val">0</div><div class="lbl">Faltas</div></div>
+    <div class="info-item recusas"><div id="recusas" class="val">0</div><div class="lbl">Recusas</div></div>
+  </div>
+</main>
 
 <div id="competitorInfo" class="competitor-info hidden">
   <div>Competidor: <span id="compNome">-</span></div>
@@ -139,10 +169,11 @@ function setRecognitionSnapshot(data, authoritative=false) {
   recognitionSnapshot = data;
   recognitionSnapshotTime = performance.now();
   const labels = {aguardando:'Aguardando reconhecimento de pista', reconhecimento:'Reconhecimento de pista', intervalo:'Intervalo antes da primeira entrada', liberado:'Pista liberada'};
-  const colors = {aguardando:'', reconhecimento:'warning', intervalo:'primary', liberado:'success'};
-  document.getElementById('recognitionBanner').className = `recognition-banner ${colors[data.estado] || ''}`;
+  const colors = {aguardando:'secondary', reconhecimento:'warning', intervalo:'primary', liberado:'success'};
+  document.getElementById('recognitionBanner').className = `recognition-banner estado-${colors[data.estado] || 'secondary'}`;
   document.getElementById('recognitionLabel').textContent = labels[data.estado] || data.estado;
   const active = data.estado === 'reconhecimento' || data.estado === 'intervalo';
+  document.body.classList.toggle('recognition-active', active);
   document.getElementById('recognitionCountdown').classList.toggle('hidden', !active);
   document.getElementById('recognitionDetail').textContent = data.estado === 'liberado'
     ? `Pista liberada para a prova #${data.id_prova}.`
@@ -173,14 +204,17 @@ function wsUrl(path) {
 
 function connectWebSocket() {
   if (ws) return;
-  ws = new WebSocket(wsUrl('/ws/prova-ativa'));
+  const provaSocket = new WebSocket(wsUrl('/ws/prova-ativa'));
+  ws = provaSocket;
   let awaitingAuthoritativeSnapshot = true;
-  ws.onopen = () => {
+  provaSocket.onopen = () => {
+    if (ws !== provaSocket) return;
     reconnectDelay = 500;
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   };
-  ws.onmessage = ev => {
+  provaSocket.onmessage = ev => {
+    if (ws !== provaSocket) return;
     try {
       const message = JSON.parse(ev.data);
       if (message.tipo === 'estado' && message.data) {
@@ -189,8 +223,15 @@ function connectWebSocket() {
       }
     } catch (_) {}
   };
-  ws.onclose = () => { ws = null; scheduleReconnect(); };
-  ws.onerror = () => ws.close();
+  provaSocket.onclose = () => {
+    if (ws !== provaSocket) return;
+    ws = null;
+    scheduleReconnect();
+  };
+  provaSocket.onerror = () => {
+    if (ws !== provaSocket) return;
+    provaSocket.close();
+  };
 }
 
 function scheduleReconnect() {
@@ -201,10 +242,17 @@ function scheduleReconnect() {
 
 function connectRecognitionWebSocket() {
   if (recognitionWs) return;
-  recognitionWs = new WebSocket(wsUrl('/ws/reconhecimento-pista'));
+  const recognitionSocket = new WebSocket(wsUrl('/ws/reconhecimento-pista'));
+  recognitionWs = recognitionSocket;
   let awaitingAuthoritativeSnapshot = true;
-  recognitionWs.onopen = () => { recognitionReconnectDelay = 500; clearTimeout(recognitionReconnectTimer); recognitionReconnectTimer = null; };
-  recognitionWs.onmessage = ev => {
+  recognitionSocket.onopen = () => {
+    if (recognitionWs !== recognitionSocket) return;
+    recognitionReconnectDelay = 500;
+    clearTimeout(recognitionReconnectTimer);
+    recognitionReconnectTimer = null;
+  };
+  recognitionSocket.onmessage = ev => {
+    if (recognitionWs !== recognitionSocket) return;
     try {
       const message = JSON.parse(ev.data);
       if (message.tipo === 'estado_reconhecimento' && message.data) {
@@ -213,8 +261,15 @@ function connectRecognitionWebSocket() {
       }
     } catch (_) {}
   };
-  recognitionWs.onclose = () => { recognitionWs = null; scheduleRecognitionReconnect(); };
-  recognitionWs.onerror = () => recognitionWs && recognitionWs.close();
+  recognitionSocket.onclose = () => {
+    if (recognitionWs !== recognitionSocket) return;
+    recognitionWs = null;
+    scheduleRecognitionReconnect();
+  };
+  recognitionSocket.onerror = () => {
+    if (recognitionWs !== recognitionSocket) return;
+    recognitionSocket.close();
+  };
 }
 
 function scheduleRecognitionReconnect() {
