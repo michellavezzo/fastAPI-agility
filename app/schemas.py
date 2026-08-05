@@ -1,6 +1,6 @@
 # app/schemas.py
-from typing import Optional
-from pydantic import BaseModel, field_validator
+from typing import Literal, Optional
+from pydantic import BaseModel, Field, field_validator
 
 # User Schemas
 class UserCreate(BaseModel):
@@ -302,6 +302,25 @@ class CronometragemResponse(BaseModel):
         from_attributes = True
 
 # Prova Ativa
+
+class ReconhecimentoPistaIniciar(BaseModel):
+    id_prova: int
+    duracao_segundos: int = Field(default=420, ge=420)
+
+
+class ReconhecimentoPistaEstado(BaseModel):
+    estado: Literal["aguardando", "reconhecimento", "intervalo", "liberado"]
+    id_prova: Optional[int] = None
+    id_reconhecimento: Optional[int] = None
+    duracao_segundos: Optional[int] = None
+    intervalo_segundos: Optional[int] = None
+    reconhecimento_restante: Optional[float] = None
+    intervalo_restante: Optional[float] = None
+    versao: int
+    iniciado_em: Optional[str] = None
+    reconhecimento_finalizado_em: Optional[str] = None
+    liberado_em: Optional[str] = None
+    cancelado_em: Optional[str] = None
 
 class ProvaAtivaPreparar(BaseModel):
     id_inscricao: int

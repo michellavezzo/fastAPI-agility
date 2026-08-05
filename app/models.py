@@ -41,8 +41,26 @@ class Prova(Base):
     avaliacoes = relationship("Avaliacao", back_populates="prova")
     descricao = Column(String, nullable=True)
     inscricoes = relationship("Inscricao", back_populates="prova")
+    reconhecimentos_pista = relationship("ReconhecimentoPista", back_populates="prova")
     criado_em = Column(DateTime(timezone=True), server_default=func.now())
     atualizado_em = Column(DateTime(timezone=True), onupdate=func.now())
+
+class ReconhecimentoPista(Base):
+    __tablename__ = "reconhecimento_pista"
+
+    id_reconhecimento = Column(Integer, primary_key=True, index=True)
+    id_prova = Column(Integer, ForeignKey("prova.id_prova"), nullable=False, index=True)
+    duracao_segundos = Column(Integer, nullable=False)
+    intervalo_segundos = Column(Integer, nullable=False, default=180)
+    status = Column(String, nullable=False, default="reconhecimento")
+    iniciado_em = Column(DateTime(timezone=True), nullable=False)
+    reconhecimento_finalizado_em = Column(DateTime(timezone=True))
+    liberado_em = Column(DateTime(timezone=True))
+    cancelado_em = Column(DateTime(timezone=True))
+    criado_em = Column(DateTime(timezone=True), server_default=func.now())
+    atualizado_em = Column(DateTime(timezone=True), onupdate=func.now())
+
+    prova = relationship("Prova", back_populates="reconhecimentos_pista")
 
 class Inscricao(Base):
     __tablename__ = "inscricao"

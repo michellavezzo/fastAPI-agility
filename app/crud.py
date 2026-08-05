@@ -1,8 +1,8 @@
 # app/crud.py
 
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
-from .models import Avaliacao, Cao, Competidor, Cronometragem, Juiz, User, Competicao, Prova, Inscricao, Resultado
+from .models import Avaliacao, Cao, Competidor, Cronometragem, Juiz, User, Competicao, Prova, Inscricao, Resultado, ReconhecimentoPista
 from .schemas import AvaliacaoCreate, AvaliacaoUpdate, CaoCreate, CaoUpdate, CompetidorCreate, CompetidorUpdate, CronometragemCreate, CronometragemUpdate, InscricaoCreate, InscricaoUpdate, JuizCreate, JuizUpdate, ProvaCreate, ProvaUpdate, ResultadoCreate, ResultadoUpdate, UserCreate, UserUpdate, CompeticaoCreate, CompeticaoUpdate
 
 # User 
@@ -96,6 +96,73 @@ def delete_prova(db: Session, prova_id: int):
     db_prova = get_prova(db, prova_id)
     db.delete(db_prova)
     db.commit()
+
+
+def get_latest_course_recognition(db: Session):
+    return (
+        db.query(ReconhecimentoPista)
+        .filter(ReconhecimentoPista.status != "cancelado")
+        .order_by(ReconhecimentoPista.id_reconhecimento.desc())
+        .first()
+    )
+
+
+def create_course_recognition(db: Session, id_prova: int, duration_seconds: int, started_at: datetime):
+    recognition = ReconhecimentoPista(
+        id_prova=id_prova,
+        duracao_segundos=duration_seconds,
+        intervalo_segundos=180,
+        status="reconhecimento",
+        iniciado_em=as_utc(started_at),
+    )
+    db.add(recognition)
+    db.commit()
+    db.refresh(recognition)
+    return recognition
+
+
+def update_course_recognition_state(db: Session, state: dict):
+    session_id = state.get("id_reconhecimento")
+    if session_id is None:
+        return None
+    recognition = db.query(ReconhecimentoPista).filter(
+        ReconhecimentoPista.id_reconhecimento == session_id
+    ).first()
+    if recognition is None:
+        return None
+    recognition.status = state["estado"]
+    recognition.reconhecimento_finalizado_em = parse_utc_timestamp(
+        state.get("reconhecimento_finalizado_em")
+    )
+    recognition.liberado_em = parse_utc_timestamp(state.get("liberado_em"))
+    db.commit()
+    db.refresh(recognition)
+    return recognition
+
+
+def cancel_course_recognition(db: Session, session_id: int, cancelled_at: str | None):
+    recognition = db.query(ReconhecimentoPista).filter(
+        ReconhecimentoPista.id_reconhecimento == session_id
+    ).first()
+    if recognition is None:
+        return None
+    recognition.status = "cancelado"
+    recognition.cancelado_em = parse_utc_timestamp(cancelled_at)
+    db.commit()
+    db.refresh(recognition)
+    return recognition
+
+
+def as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def parse_utc_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    return as_utc(datetime.fromisoformat(value))
 
 # Inscricao (Registration)
 

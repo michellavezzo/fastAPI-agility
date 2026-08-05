@@ -1,5 +1,6 @@
 from pathlib import Path as FilePath
 from typing import Optional
+from datetime import datetime, timezone
 
 import asyncio
 import logging
@@ -17,8 +18,9 @@ from .chrono import (
     IR_CALIBRATION_APPLY_DEFAULT,
     IR_CALIBRATION_SAVE_DEFAULT,
 )
+from .course_recognition import CourseRecognitionTimer
 from .ir_calibration import CalibrationError
-from .database import engine, get_db
+from .database import SessionLocal, engine, get_db
 
 models.Base.metadata.create_all(bind=engine)
 
@@ -66,6 +68,10 @@ app.add_middleware(
 )
 
 _chrono = None
+_course_recognition = None
+_course_recognition_listener_timer = None
+_course_recognition_task = None
+_course_recognition_last_persisted_version = None
 STATIC_DIR = FilePath(__file__).resolve().parent.parent / "static"
 
 
@@ -134,6 +140,69 @@ class ProvaAtivaWebSocketManager:
 ws_manager = ProvaAtivaWebSocketManager()
 
 
+class CourseRecognitionWebSocketManager:
+    def __init__(self):
+        self._connections = set()
+        self._lock = asyncio.Lock()
+        self._send_lock = asyncio.Lock()
+        self._loop = None
+        self._broadcast_pending = False
+
+    def bind_loop(self):
+        self._loop = asyncio.get_running_loop()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        async with self._lock:
+            self._connections.add(websocket)
+        await self._send_state(websocket)
+
+    async def disconnect(self, websocket: WebSocket):
+        async with self._lock:
+            self._connections.discard(websocket)
+
+    def schedule_state_broadcast(self, *_):
+        if self._loop is None or self._loop.is_closed():
+            return
+        self._loop.call_soon_threadsafe(self._ensure_broadcast_task)
+
+    def _ensure_broadcast_task(self):
+        if self._broadcast_pending:
+            return
+        self._broadcast_pending = True
+        asyncio.create_task(self.broadcast_state())
+
+    async def _send_state(self, websocket: WebSocket):
+        async with self._send_lock:
+            await websocket.send_json({
+                "tipo": "estado_reconhecimento",
+                "data": get_course_recognition().get_state(),
+            })
+
+    async def broadcast_state(self):
+        self._broadcast_pending = False
+        payload = {
+            "tipo": "estado_reconhecimento",
+            "data": get_course_recognition().get_state(),
+        }
+        async with self._lock:
+            connections = tuple(self._connections)
+        stale_connections = []
+        async with self._send_lock:
+            for websocket in connections:
+                try:
+                    await websocket.send_json(payload)
+                except Exception:
+                    stale_connections.append(websocket)
+        if stale_connections:
+            async with self._lock:
+                for websocket in stale_connections:
+                    self._connections.discard(websocket)
+
+
+course_recognition_ws_manager = CourseRecognitionWebSocketManager()
+
+
 def get_chrono():
     global _chrono
     if _chrono is None:
@@ -142,9 +211,53 @@ def get_chrono():
     return _chrono
 
 
+def get_course_recognition():
+    global _course_recognition, _course_recognition_listener_timer
+    if _course_recognition is None:
+        _course_recognition = CourseRecognitionTimer()
+    if _course_recognition_listener_timer is not _course_recognition:
+        _course_recognition.add_state_change_listener(
+            course_recognition_ws_manager.schedule_state_broadcast
+        )
+        _course_recognition_listener_timer = _course_recognition
+    return _course_recognition
+
+
+def restore_course_recognition():
+    timer = get_course_recognition()
+    with SessionLocal() as db:
+        recognition = crud.get_latest_course_recognition(db)
+        if recognition is None:
+            return timer.get_state()
+        return timer.restore(
+            id_prova=recognition.id_prova,
+            session_id=recognition.id_reconhecimento,
+            duration_seconds=recognition.duracao_segundos,
+            interval_seconds=recognition.intervalo_segundos,
+            started_at=crud.as_utc(recognition.iniciado_em),
+        )
+
+
+async def course_recognition_tick_loop():
+    global _course_recognition_last_persisted_version
+    while True:
+        state = get_course_recognition().tick()
+        if state["versao"] != _course_recognition_last_persisted_version:
+            with SessionLocal() as db:
+                crud.update_course_recognition_state(db, state)
+            _course_recognition_last_persisted_version = state["versao"]
+        await asyncio.sleep(0.25)
+
+
 @app.on_event("startup")
 async def startup_event():
+    global _course_recognition_task, _course_recognition_last_persisted_version
     ws_manager.bind_loop()
+    course_recognition_ws_manager.bind_loop()
+    recognition_state = restore_course_recognition()
+    _course_recognition_last_persisted_version = recognition_state["versao"]
+    if _course_recognition_task is None or _course_recognition_task.done():
+        _course_recognition_task = asyncio.create_task(course_recognition_tick_loop())
     chrono = get_chrono()
     if IR_CALIBRATE_ON_STARTUP_DEFAULT:
         logging.info("AGILITY_IR_CALIBRATE_ON_STARTUP ativo. Calibrando sensor IR antes de liberar API.")
@@ -203,6 +316,16 @@ async def websocket_prova_ativa(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         await ws_manager.disconnect(websocket)
+
+
+@app.websocket("/ws/reconhecimento-pista")
+async def websocket_reconhecimento_pista(websocket: WebSocket):
+    await course_recognition_ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        await course_recognition_ws_manager.disconnect(websocket)
 
 #  Usuários
 
@@ -453,12 +576,74 @@ def delete_cronometro_endpoint(cronometro_id: int, db: Session = Depends(get_db)
 
 # ────────────────── Prova Ativa (cronômetro em tempo real) ──────────────────
 
+@app.post("/reconhecimento-pista/iniciar", response_model=schemas.ReconhecimentoPistaEstado)
+def iniciar_reconhecimento_pista(
+    body: schemas.ReconhecimentoPistaIniciar,
+    db: Session = Depends(get_db),
+):
+    prova = crud.get_prova(db, body.id_prova)
+    if prova is None:
+        raise HTTPException(status_code=404, detail="Prova não encontrada")
+    timer = get_course_recognition()
+    if timer.get_state()["estado"] in ("reconhecimento", "intervalo"):
+        raise HTTPException(status_code=409, detail="Já existe reconhecimento de pista em andamento")
+    recognition = crud.create_course_recognition(
+        db,
+        id_prova=body.id_prova,
+        duration_seconds=body.duracao_segundos,
+        started_at=datetime.now(timezone.utc),
+    )
+    try:
+        state = timer.start(
+            id_prova=body.id_prova,
+            session_id=recognition.id_reconhecimento,
+            duration_seconds=body.duracao_segundos,
+            started_at=crud.as_utc(recognition.iniciado_em),
+        )
+    except Exception:
+        db.delete(recognition)
+        db.commit()
+        raise
+    return state
+
+
+@app.get("/reconhecimento-pista/estado", response_model=schemas.ReconhecimentoPistaEstado)
+def estado_reconhecimento_pista(response: Response):
+    _no_store(response)
+    return get_course_recognition().tick()
+
+
+@app.post("/reconhecimento-pista/cancelar", response_model=schemas.ReconhecimentoPistaEstado)
+def cancelar_reconhecimento_pista(db: Session = Depends(get_db)):
+    timer = get_course_recognition()
+    active_state = timer.get_state()
+    state = timer.cancel()
+    if active_state["id_reconhecimento"] is not None:
+        crud.cancel_course_recognition(
+            db,
+            session_id=active_state["id_reconhecimento"],
+            cancelled_at=state["cancelado_em"],
+        )
+    return state
+
+
+@app.post("/reconhecimento-pista/reset", response_model=schemas.ReconhecimentoPistaEstado)
+def resetar_reconhecimento_pista():
+    timer = get_course_recognition()
+    if timer.get_state()["estado"] in ("reconhecimento", "intervalo"):
+        raise HTTPException(
+            status_code=409,
+            detail="Reconhecimento de pista em andamento deve ser cancelado antes do reset.",
+        )
+    return timer.reset()
+
 @app.post("/prova-ativa/preparar", response_model=schemas.ProvaAtivaEstado)
 def preparar_prova(body: schemas.ProvaAtivaPreparar, db: Session = Depends(get_db)):
     insc = crud.get_inscricao(db, body.id_inscricao)
     if not insc:
         raise HTTPException(status_code=404, detail="Inscrição não encontrada")
     dados = {}
+    dados["id_prova"] = insc.id_prova
     if insc.competidor:
         dados["competidor_nome"] = insc.competidor.nome
     if insc.cao:
@@ -480,6 +665,23 @@ def preparar_prova(body: schemas.ProvaAtivaPreparar, db: Session = Depends(get_d
 @app.post("/prova-ativa/autorizar", response_model=schemas.ProvaAtivaEstado)
 def autorizar_prova():
     chrono = get_chrono()
+    prepared_state = chrono.get_estado_completo()
+    id_prova = prepared_state.get("id_prova")
+    if prepared_state["estado"] == "preparado":
+        recognition = get_course_recognition()
+        recognition_state = recognition.tick()
+        if not recognition.is_released_for(id_prova):
+            remaining = recognition_state.get("reconhecimento_restante")
+            if remaining is None:
+                remaining = recognition_state.get("intervalo_restante")
+            remaining_detail = "sem sessão ativa" if remaining is None else f"{remaining:.0f}s restantes"
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Reconhecimento de pista não liberado para a prova "
+                    f"{id_prova}: estado {recognition_state['estado']} ({remaining_detail})."
+                ),
+            )
     if not chrono.autorizar():
         raise HTTPException(
             status_code=409,
@@ -613,6 +815,14 @@ def operador():
 
 
 @app.on_event("shutdown")
-def shutdown_event():
+async def shutdown_event():
+    global _course_recognition_task
+    if _course_recognition_task is not None:
+        _course_recognition_task.cancel()
+        try:
+            await _course_recognition_task
+        except asyncio.CancelledError:
+            pass
+        _course_recognition_task = None
     if _chrono is not None:
         _chrono.cleanup()
